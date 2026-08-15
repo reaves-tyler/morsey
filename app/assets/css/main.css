@@ -1,0 +1,43 @@
+@import "tailwindcss";
+@import "@nuxt/ui";
+
+:root {
+  --ui-bg: var(--color-zinc-950);
+}
+
+html {
+  scrollbar-gutter: stable;
+}
+
+body {
+  background-color: var(--color-zinc-950);
+  color: var(--color-zinc-100);
+  font-feature-settings: "tnum";
+}
+
+/* Subtle pulse used when audio is playing */
+@keyframes morsey-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.92); }
+}
+.morsey-pulse {
+  animation: morsey-pulse 0.9s ease-in-out infinite;
+}
+
+/* Answer feedback flashes */
+@keyframes morsey-flash-good {
+  0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.6); }
+  100% { box-shadow: 0 0 0 14px rgba(16, 185, 129, 0); }
+}
+.morsey-good {
+  animation: morsey-flash-good 0.5s ease-out;
+}
+@keyframes morsey-flash-bad {
+  0%, 20%, 60% { transform: translateX(0); }
+  10% { transform: translateX(-5px); }
+  40% { transform: translateX(5px); }
+  100% { transform: translateX(0); }
+}
+.morsey-bad {
+  animation: morsey-flash-bad 0.35s ease-in-out;
+}
