@@ -8,6 +8,7 @@ Gamified morse code (CW) trainer for amateur radio. Static Nuxt 4 app, no backen
 pnpm install          # pnpm ONLY — npm/npx/yarn are not used in this repo
 pnpm dev              # dev server on :3000
 pnpm run generate     # static production build → .output/public
+pnpm test             # vitest — keyer engine state machines (fake timers)
 pnpm exec nuxt typecheck
 ```
 
@@ -27,7 +28,8 @@ pnpm 11 gates postinstall scripts: approved builds live in `pnpm-workspace.yaml`
 | `app/utils/abbreviations.ts` | `PHRASE_TIERS`: six progressive tiers of Q-signals, prosigns, RST reports, abbreviations. `send` is what's keyed; prosigns wrapped in `<>`. |
 | `app/composables/useProgress.ts` | All persistent state (XP, streak, Koch lesson + rolling accuracy window, per-char stats, phrase mastery, settings). Persists to localStorage key `morsey-progress-v1`; loads via `onNuxtReady` **after** hydration to avoid SSR mismatches. `parseProgressJson` validates import files. |
 | `app/composables/useMorseAudio.ts` | Web Audio engine. Module-level singleton AudioContext; scheduled playback (`playText`, cancellable — `stop()` resolves the pending promise so awaiting callers never hang), zero-latency keyer sidetone (`keyDown`/`keyUp`), feedback cues (`playCue('good'|'bad')`). 5 ms gain ramps prevent clicks. |
-| `app/composables/useKeyer.ts` | Module-level singleton (bar + send page share one keyer and one serial connection). All inputs — keyboard, on-screen keys, USB bridge — arrive as raw `tip`/`ring` contact closures; `settings.keyType` decides what they mean, like a rig's keyer menu: straight (tip only — mono-plug safe; manual timing, adaptive dit classification), bug (auto dits + manual dahs), iambic A, iambic B (Curtis-B one-element memory). `paddleReverse` swaps roles. Timing uses `settings.sendWpm`, NOT the receive speed. Letter/word commit gaps stretched (4u/8u, 450 ms/1.2 s floors). Backspace clears. |
+| `app/utils/keyerEngine.ts` | Pure keyer engine — every sending-side state machine, no Vue/Nuxt/audio/clock dependencies (host injects `now`/`setTimer` and receives events via callbacks). Raw `tip`/`ring` contacts in; `keyType` decides meaning, like a rig's keyer menu: straight (tip only — mono-plug safe; manual timing, adaptive dit classification), bug (auto dits + manual dahs), iambic A, iambic B (Curtis-B memory latched at element start AND on mid-element squeeze). `paddleReverse` swaps roles. Timing uses `sendWpm`, NOT the receive speed. Letter/word commit gaps stretched (4u/8u, 450 ms/1.2 s floors). Unit-tested in `tests/keyerEngine.test.ts` under fake timers — change the engine, run `pnpm test`. |
+| `app/composables/useKeyer.ts` | Thin adapter over the engine, module-level singleton (bar + send page share one keyer and one serial connection, which survives navigation). Wires engine events to refs + Web Audio; feeds it contacts from keyboard (straight: Space; else `[`/`]` or Ctrl keys), on-screen keys, and the USB bridge's `TIP_*`/`RING_*` serial lines. Backspace clears. `keyType` changes hard-reset the engine; `sendWpm` changes reset calibration. |
 | `app/components/KeyerBar.vue` | Radio-front-panel bar fixed to the bottom of every page: collapsed strip of lit status pills (key type, REV, WPM, tone, USB, TX), pulls up into a soft-key config panel (key type, reverse, speed/tone/volume sliders, serial connect). |
 | `hardware/pico-bridge/` | MicroPython `main.py` for a Raspberry Pi Pico H key→USB bridge (GP14 = tip, GP15 = ring, pull-ups, 5 ms stable-state debounce). Deliberately dumb passthrough: emits only `TIP_DOWN`/`TIP_UP`/`RING_DOWN`/`RING_UP` lines; all interpretation stays in the browser keyer. |
 | `app/pages/learn.vue` | Koch trainer. Answers accepted during playback (eyes-free flow); chirp/buzz audio feedback; unlock at ≥90% over `UNLOCK_WINDOW` (30) answers. |
@@ -50,4 +52,5 @@ Icon gotcha: `icon.provider: 'iconify'` lives under `$production` in `nuxt.confi
 
 ## Verification
 
-No test suite; verify behavior in the real app. Serve `.output/public`, then drive with playwright-core (`~/.cache/ms-playwright/chromium_headless_shell-*`) — keyboard events with realistic hold/gap timings exercise the trainer and keyer end-to-end. Always check the browser console for errors and run `pnpm exec nuxt typecheck` before committing.
+- **Keyer timing/decode logic**: `pnpm test` — deterministic Vitest suite over the pure engine with fake timers (runs in CI before every deploy). Any change to element timing, iambic behavior, classification, or gap policy belongs there first.
+- **Everything else**: verify in the real app. Serve `.output/public`, then drive with playwright-core (`~/.cache/ms-playwright/chromium_headless_shell-*`) — keyboard events with realistic hold/gap timings exercise the trainer and keyer end-to-end. Always check the browser console for errors and run `pnpm exec nuxt typecheck` before committing.
