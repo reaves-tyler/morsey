@@ -144,6 +144,31 @@ function applyImport() {
     </UCard>
 
     <UCard>
+      <h2 class="font-medium">Operator</h2>
+      <p class="text-sm text-zinc-500">Used by the QSO simulator as your side of the contact.</p>
+      <div class="mt-4 grid gap-4 sm:grid-cols-2">
+        <div>
+          <label class="mb-1.5 block text-sm font-medium">Callsign</label>
+          <input
+            v-model="s.myCall"
+            type="text" autocomplete="off" spellcheck="false"
+            class="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 font-mono uppercase tracking-widest text-zinc-100 outline-none focus:border-emerald-500"
+            placeholder="N0CALL"
+          >
+        </div>
+        <div>
+          <label class="mb-1.5 block text-sm font-medium">Name</label>
+          <input
+            v-model="s.myName"
+            type="text" autocomplete="off" spellcheck="false"
+            class="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 font-mono uppercase tracking-widest text-zinc-100 outline-none focus:border-emerald-500"
+            placeholder="TYLER"
+          >
+        </div>
+      </div>
+    </UCard>
+
+    <UCard>
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 class="font-medium">Backup & restore</h2>

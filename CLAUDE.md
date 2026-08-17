@@ -32,9 +32,13 @@ pnpm 11 gates postinstall scripts: approved builds live in `pnpm-workspace.yaml`
 | `app/composables/useKeyer.ts` | Thin adapter over the engine, module-level singleton (bar + send page share one keyer and one serial connection, which survives navigation). Wires engine events to refs + Web Audio; feeds it contacts from keyboard (straight: Space; else `[`/`]` or Ctrl keys), on-screen keys, and the USB bridge's `TIP_*`/`RING_*` serial lines. Backspace clears. `keyType` changes hard-reset the engine; `sendWpm` changes reset calibration. |
 | `app/components/KeyerBar.vue` | Radio-front-panel bar fixed to the bottom of every page: collapsed strip of lit status pills (key type, REV, WPM, tone, USB, TX), pulls up into a soft-key config panel (key type, reverse, speed/tone/volume sliders, serial connect). |
 | `hardware/pico-bridge/` | MicroPython `main.py` for a Raspberry Pi Pico H key→USB bridge (GP14 = tip, GP15 = ring, pull-ups, 5 ms stable-state debounce). Deliberately dumb passthrough: emits only `TIP_DOWN`/`TIP_UP`/`RING_DOWN`/`RING_UP` lines; all interpretation stays in the browser keyer. |
-| `app/pages/learn.vue` | Koch trainer. Answers accepted during playback (eyes-free flow); chirp/buzz audio feedback; unlock at ≥90% over `UNLOCK_WINDOW` (30) answers. |
+| `app/pages/learn.vue` | Koch trainer. Answers accepted during playback (eyes-free flow); chirp/buzz audio feedback; unlock at ≥90% over `UNLOCK_WINDOW` (30) answers. Four modes: choose grid, copy groups, words (top-100 + ham words filtered to unlocked letters), callsigns (unlocks once a digit is learned). |
 | `app/pages/phrases.vue` | Tiered phrase quiz; mastery = 3 consecutive correct; next tier at 80% mastered. |
-| `app/pages/send.vue` | Sending practice: char/phrase challenges validated against live decode. |
+| `app/pages/send.vue` | Sending practice: char/phrase challenges validated against live decode, plus fist analysis (dah:dit ratio, consistency CV) fed by the engine's `onManualElement`. |
+| `app/pages/qso.vue` | Scripted first-contact simulator (`app/utils/qso.ts` builds the steps per the standard FISTS/QRP-Labs structure); listen steps copy fields, send steps validate live decode; receive-only toggle. |
+| `app/pages/stats.vue` | Stat tiles, per-char accuracy heatmap (sequential emerald ramp), 30-day activity SVG bars from `progress.history` (recorded in `recordAnswer`/`addXp`), table fallback. |
+| `app/utils/callsigns.ts` | Weighted ITU-prefix callsign generator (`generateCallsign(allowedChars?)` respects Koch progression). |
+| `app/utils/words.ts` | Top-100 English + ham words; `wordsFor(unlockedLetters)`. |
 | `app/components/ReferenceLegend.vue` | Searchable legend (text / meaning / pattern-prefix search), used by the nav slideover (`compact`) and `/reference`. |
 
 ## Deployment
@@ -42,6 +46,8 @@ pnpm 11 gates postinstall scripts: approved builds live in `pnpm-workspace.yaml`
 Push to `main` → `.github/workflows/deploy.yml` → `pnpm exec nuxt build --preset github_pages` with `NUXT_APP_BASE_URL=/<repo>/` → GitHub Pages. Pages source is "GitHub Actions" (already configured).
 
 Icon gotcha: `icon.provider: 'iconify'` lives under `$production` in `nuxt.config.ts` — prerender fetches icon data from the Iconify API (the static preset has no server icon endpoint) while browsers use the scanned client bundle. Do **not** hoist it to top level: dev must keep the default local server provider or it produces `[Icon] failed to load icon` warnings offline.
+
+PWA gotchas (@vite-pwa/nuxt): the manifest link requires `<NuxtPwaManifest />` in app.vue; the module's own SW registration doesn't fire on the prerendered site, so `app/plugins/register-sw.client.ts` registers explicitly (base-URL aware). Workbox config in `nuxt.config.ts` MUST keep the `manifestTransforms` filter (the `/200`, `/404` precache entries return non-200 and abort the entire SW install — on GitHub Pages too) and `navigateFallback: null` (a fallback shell hijacks online navigations; the default `/` fallback also breaks install with non-precached-url). Verify SW health via CDP `ServiceWorker.workerErrorReported`, not just `register()` resolving.
 
 ## Domain rules (do not "fix" these)
 

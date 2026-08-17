@@ -1,6 +1,6 @@
 export default defineNuxtConfig({
   compatibilityDate: '2025-07-15',
-  modules: ['@nuxt/ui'],
+  modules: ['@nuxt/ui', '@vite-pwa/nuxt'],
   css: ['~/assets/css/main.css'],
   ssr: true,
   devtools: { enabled: false },
@@ -43,6 +43,41 @@ export default defineNuxtConfig({
     prerender: {
       crawlLinks: true,
       routes: ['/']
+    }
+  },
+  pwa: {
+    registerType: 'autoUpdate',
+    manifest: {
+      name: 'Morsey — CW Trainer',
+      short_name: 'Morsey',
+      description: 'Gamified morse code trainer: Koch method, Farnsworth timing, sending practice, and a QSO simulator.',
+      theme_color: '#09090b',
+      background_color: '#09090b',
+      display: 'standalone',
+      icons: [
+        { src: 'pwa-192x192.png', sizes: '192x192', type: 'image/png' },
+        { src: 'pwa-512x512.png', sizes: '512x512', type: 'image/png' },
+        { src: 'maskable-icon-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
+      ]
+    },
+    workbox: {
+      globPatterns: ['**/*.{js,css,html,svg,png,ico,json,woff2}'],
+      // No SPA fallback: every route is prerendered and precached, in-app
+      // navigation is client-side, and a fallback shell would hijack normal
+      // online navigations (serving the '/' document for /learn). Offline,
+      // hard navigations resolve via directoryIndex for canonical
+      // trailing-slash URLs; the module's default '/' fallback also breaks
+      // the SW install outright (non-precached-url).
+      navigateFallback: null,
+      // The prerendered error/SPA-fallback routes respond with non-200 when
+      // fetched by their clean URL, which aborts the whole SW install
+      // (Workbox precaching requires 200s) — keep them out of the manifest
+      manifestTransforms: [
+        async (entries: any[]) => ({
+          manifest: entries.filter(e => !/^\/?(200|404)(\.html)?$/.test(e.url)),
+          warnings: []
+        })
+      ]
     }
   }
 })

@@ -1,4 +1,4 @@
-import { morseTimings, textToSchedule } from '~/utils/morse'
+import { MORSE, morseTimings, textToSchedule } from '~/utils/morse'
 
 /**
  * Web Audio engine. Two paths:
@@ -16,6 +16,18 @@ let playbackNodes: { osc: OscillatorNode; gain: GainNode } | null = null
 let playbackTimer: ReturnType<typeof setTimeout> | null = null
 let playbackResolve: (() => void) | null = null
 let keyNodes: { osc: OscillatorNode; gain: GainNode } | null = null
+/** band-condition nodes active during the current playback */
+let bandNodes: AudioNode[] = []
+let noiseBuffer: AudioBuffer | null = null
+
+function whiteNoise(audio: AudioContext): AudioBuffer {
+  if (!noiseBuffer) {
+    noiseBuffer = audio.createBuffer(1, audio.sampleRate * 2, audio.sampleRate)
+    const data = noiseBuffer.getChannelData(0)
+    for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1
+  }
+  return noiseBuffer
+}
 
 function ensureCtx(): AudioContext {
   if (!ctx) ctx = new AudioContext()
@@ -47,7 +59,100 @@ export function useMorseAudio() {
       osc.stop(ctx.currentTime + RAMP + 0.01)
       playbackNodes = null
     }
+    stopBand()
     playing.value = false
+  }
+
+  function stopBand() {
+    for (const node of bandNodes) {
+      try {
+        if ('stop' in node) (node as OscillatorNode).stop()
+        node.disconnect()
+      } catch { /* already stopped */ }
+    }
+    bandNodes = []
+  }
+
+  /**
+   * Simulated band conditions, applied to receive playback only:
+   *  - QRN: white noise through a bandpass at the sidetone frequency — what
+   *    atmospheric static sounds like inside a receiver's CW filter
+   *  - QSB: slow fading — a 0.1-0.3 Hz LFO modulating the signal chain gain
+   *  - QRM: a weaker off-frequency station sending random characters
+   * Returns the node the signal chain should terminate into.
+   */
+  function buildBand(audio: AudioContext, start: number, total: number): AudioNode {
+    const s = progress.value.settings
+    let signalOut: AudioNode = audio.destination
+
+    if (s.qsbDepth > 0) {
+      // signal → qsbGain → destination; LFO wiggles qsbGain.gain around a base
+      const qsbGain = audio.createGain()
+      const depth = Math.min(0.95, s.qsbDepth)
+      qsbGain.gain.value = 1 - depth / 2
+      const lfo = audio.createOscillator()
+      lfo.type = 'sine'
+      lfo.frequency.value = 0.1 + Math.random() * 0.2
+      const lfoAmp = audio.createGain()
+      lfoAmp.gain.value = depth / 2
+      lfo.connect(lfoAmp).connect(qsbGain.gain)
+      qsbGain.connect(audio.destination)
+      lfo.start(start)
+      lfo.stop(start + total + 0.2)
+      bandNodes.push(lfo, lfoAmp, qsbGain)
+      signalOut = qsbGain
+    }
+
+    if (s.qrnLevel > 0) {
+      const src = audio.createBufferSource()
+      src.buffer = whiteNoise(audio)
+      src.loop = true
+      const filter = audio.createBiquadFilter()
+      filter.type = 'bandpass'
+      filter.frequency.value = s.freq
+      filter.Q.value = 0.9
+      const noiseGain = audio.createGain()
+      // fade the noise in/out so toggling never clicks
+      const level = s.qrnLevel * s.volume * 0.9
+      noiseGain.gain.setValueAtTime(0, start - 0.05 > audio.currentTime ? start - 0.05 : audio.currentTime)
+      noiseGain.gain.linearRampToValueAtTime(level, start + 0.1)
+      noiseGain.gain.setValueAtTime(level, start + total)
+      noiseGain.gain.linearRampToValueAtTime(0, start + total + 0.1)
+      src.connect(filter).connect(noiseGain).connect(audio.destination)
+      src.start(audio.currentTime)
+      src.stop(start + total + 0.2)
+      bandNodes.push(src, filter, noiseGain)
+    }
+
+    if (s.qrm) {
+      // A second station, off-frequency and weaker, sending random characters
+      const chars = Object.keys(MORSE)
+      let text = ''
+      for (let i = 0; i < 10; i++) text += chars[Math.floor(Math.random() * chars.length)]
+      const t = morseTimings(22, 22)
+      const { segments } = textToSchedule(text, t)
+      const osc = audio.createOscillator()
+      osc.type = 'sine'
+      osc.frequency.value = s.freq + (Math.random() < 0.5 ? -1 : 1) * (150 + Math.random() * 250)
+      const qrmGain = audio.createGain()
+      qrmGain.gain.value = 0
+      const level = s.volume * 0.22
+      const offset = Math.random() * total * 0.3
+      for (const seg of segments) {
+        const at = start + offset + seg.at
+        if (at + seg.dur > start + total) break
+        qrmGain.gain.setValueAtTime(0, at)
+        qrmGain.gain.linearRampToValueAtTime(level, at + RAMP)
+        qrmGain.gain.setValueAtTime(level, at + seg.dur - RAMP)
+        qrmGain.gain.linearRampToValueAtTime(0, at + seg.dur)
+      }
+      osc.connect(qrmGain).connect(audio.destination)
+      osc.start(start)
+      osc.stop(start + total + 0.1)
+      bandNodes.push(osc, qrmGain)
+    }
+
+    return signalOut
   }
 
   /**
@@ -69,9 +174,11 @@ export function useMorseAudio() {
     osc.type = 'sine'
     osc.frequency.value = s.freq
     gain.gain.value = 0
-    osc.connect(gain).connect(audio.destination)
 
     const start = audio.currentTime + 0.06
+    // Route the signal through the band-condition chain (QSB fading), and let
+    // QRN/QRM sources run alongside for the playback window
+    osc.connect(gain).connect(buildBand(audio, start, total))
     const vol = s.volume
     for (const seg of segments) {
       gain.gain.setValueAtTime(0, start + seg.at)

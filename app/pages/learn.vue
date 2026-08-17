@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { TOTAL_LESSONS, patternFor } from '~/utils/morse'
+import { wordsFor } from '~/utils/words'
+import { generateCallsign, callsignsAvailable } from '~/utils/callsigns'
 import { UNLOCK_WINDOW } from '~/composables/useProgress'
 
 const {
@@ -8,8 +10,33 @@ const {
 } = useProgress()
 const audio = useMorseAudio()
 
-type Mode = 'choose' | 'copy'
+type Mode = 'choose' | 'copy' | 'words' | 'calls'
 const mode = ref<Mode>('choose')
+
+// Word/callsign availability grows with the Koch progression
+const unlockedLetters = computed(() => unlockedChars.value.filter(c => /^[A-Z]$/.test(c)))
+const availableWords = computed(() => wordsFor(unlockedLetters.value))
+const wordsReady = computed(() => availableWords.value.length >= 5)
+const callsReady = computed(() => callsignsAvailable(unlockedChars.value))
+
+const MODE_TABS: { key: Mode, label: string }[] = [
+  { key: 'choose', label: 'Listen & Choose' },
+  { key: 'copy', label: 'Copy Groups' },
+  { key: 'words', label: 'Words' },
+  { key: 'calls', label: 'Callsigns' }
+]
+
+function modeReady(m: Mode): boolean {
+  if (m === 'words') return wordsReady.value
+  if (m === 'calls') return callsReady.value
+  return true
+}
+
+function modeHint(m: Mode): string {
+  if (m === 'words' && !wordsReady.value) return 'Unlock more letters first'
+  if (m === 'calls' && !callsReady.value) return 'Needs a digit — keep going in the Koch order'
+  return ''
+}
 
 const combo = ref(0)
 const sessionCorrect = ref(0)
@@ -113,7 +140,7 @@ function onKeydown(e: KeyboardEvent) {
   }
 }
 
-// ---- Copy mode (type full groups) -------------------------------------------
+// ---- Typed modes: copy groups, words, callsigns -------------------------------
 
 type CopyState = 'idle' | 'playing' | 'typing' | 'result'
 const copyState = ref<CopyState>('idle')
@@ -121,7 +148,21 @@ const copyTarget = ref('')
 const copyInput = ref('')
 const copyResults = ref<{ char: string; typed: string; correct: boolean }[]>([])
 
-function makeGroup(): string {
+/** All-correct bonus scales with difficulty. */
+const ALL_CORRECT_BONUS: Record<string, number> = { copy: 25, words: 30, calls: 50 }
+
+function makeTarget(): string {
+  if (mode.value === 'words') {
+    const pool = availableWords.value
+    let word = pool[Math.floor(Math.random() * pool.length)]!
+    if (pool.length > 1) {
+      while (word === copyTarget.value) word = pool[Math.floor(Math.random() * pool.length)]!
+    }
+    return word
+  }
+  if (mode.value === 'calls') {
+    return generateCallsign(unlockedChars.value)?.call ?? ''
+  }
   const size = progress.value.settings.groupSize
   let out = ''
   for (let i = 0; i < size; i++) out += pickChar()
@@ -129,11 +170,11 @@ function makeGroup(): string {
 }
 
 async function playGroup() {
-  copyTarget.value = makeGroup()
+  copyTarget.value = makeTarget()
   copyInput.value = ''
   copyResults.value = []
   copyState.value = 'playing'
-  // characters in a group are separated by standard Farnsworth char gaps
+  // characters are separated by standard Farnsworth char gaps
   await audio.playText(copyTarget.value)
   if (copyState.value === 'playing') copyState.value = 'typing'
 }
@@ -166,7 +207,7 @@ function submitCopy() {
   const allCorrect = results.every(r => r.correct)
   if (allCorrect) {
     combo.value++
-    gained += 25
+    gained += ALL_CORRECT_BONUS[mode.value] ?? 25
     if (combo.value > progress.value.bestCombo) progress.value.bestCombo = combo.value
   } else {
     combo.value = 0
@@ -179,6 +220,13 @@ function submitCopy() {
 // ---- Lesson unlock -----------------------------------------------------------
 
 const justUnlocked = ref('')
+
+function switchMode(m: Mode) {
+  mode.value = m
+  copyState.value = 'idle'
+  copyTarget.value = ''
+  audio.stop()
+}
 
 function unlockNext() {
   advanceLesson()
@@ -222,22 +270,18 @@ onBeforeUnmount(() => {
           </template>
         </p>
       </div>
-      <div class="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900 p-1">
+      <div class="flex flex-wrap items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 p-1">
         <UButton
-          :variant="mode === 'choose' ? 'solid' : 'ghost'"
-          :color="mode === 'choose' ? 'primary' : 'neutral'"
+          v-for="tab in MODE_TABS"
+          :key="tab.key"
+          :variant="mode === tab.key ? 'solid' : 'ghost'"
+          :color="mode === tab.key ? 'primary' : 'neutral'"
           size="sm"
-          @click="mode = 'choose'; audio.stop()"
+          :disabled="!modeReady(tab.key)"
+          :title="modeHint(tab.key)"
+          @click="switchMode(tab.key)"
         >
-          Listen & Choose
-        </UButton>
-        <UButton
-          :variant="mode === 'copy' ? 'solid' : 'ghost'"
-          :color="mode === 'copy' ? 'primary' : 'neutral'"
-          size="sm"
-          @click="mode = 'copy'; audio.stop()"
-        >
-          Copy Groups
+          {{ tab.label }}
         </UButton>
       </div>
     </header>
@@ -397,12 +441,22 @@ onBeforeUnmount(() => {
       </div>
     </UCard>
 
-    <!-- COPY GROUPS -->
+    <!-- TYPED MODES: copy groups / words / callsigns -->
     <UCard v-else>
       <div class="flex flex-col items-center gap-6 py-6">
         <p class="max-w-md text-center text-sm text-zinc-400">
-          A random group of {{ progress.settings.groupSize }} characters plays with Farnsworth spacing.
-          Type what you hear, then submit.
+          <template v-if="mode === 'copy'">
+            A random group of {{ progress.settings.groupSize }} characters plays with Farnsworth spacing.
+            Type what you hear, then submit.
+          </template>
+          <template v-else-if="mode === 'words'">
+            A real word plays — hear the rhythm of the whole word, not the letters.
+            {{ availableWords.length }} words available from your unlocked letters.
+          </template>
+          <template v-else>
+            A realistic callsign plays, built from real ITU country prefixes.
+            Copying calls is the first skill you need on the air.
+          </template>
         </p>
 
         <div v-if="copyState === 'result'" class="flex gap-2 font-mono text-2xl">
@@ -425,8 +479,8 @@ onBeforeUnmount(() => {
           autocomplete="off"
           autocapitalize="characters"
           spellcheck="false"
-          :maxlength="progress.settings.groupSize"
-          class="w-56 rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-3 text-center font-mono text-2xl uppercase tracking-[0.5em] text-zinc-100 outline-none focus:border-emerald-500"
+          :maxlength="copyTarget.length || progress.settings.groupSize"
+          class="w-72 rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-3 text-center font-mono text-2xl uppercase tracking-[0.4em] text-zinc-100 outline-none focus:border-emerald-500"
           placeholder="·····"
           @keydown.enter="submitCopy"
         >
@@ -444,7 +498,7 @@ onBeforeUnmount(() => {
             icon="i-lucide-play"
             @click="playGroup"
           >
-            {{ copyState === 'idle' ? 'Play a group' : 'Next group' }}
+            {{ copyState === 'idle' ? 'Play' : 'Next' }}
           </UButton>
           <template v-if="copyState === 'typing'">
             <UButton variant="soft" color="neutral" icon="i-lucide-rotate-ccw" @click="replayGroup">Replay</UButton>

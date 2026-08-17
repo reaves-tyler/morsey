@@ -27,6 +27,8 @@ export interface ProgressState {
   chars: Record<string, { seen: number; correct: number }>
   /** per-phrase consecutive-correct streaks, keyed by abbr */
   phraseStreaks: Record<string, number>
+  /** daily activity aggregates, keyed by ISO date (for the stats page) */
+  history: Record<string, { answers: number, correct: number, xp: number }>
   settings: {
     charWpm: number
     effectiveWpm: number
@@ -39,6 +41,13 @@ export interface ProgressState {
     keyType: KeyType
     /** swap tip/ring roles (standard is tip = dit) */
     paddleReverse: boolean
+    /** simulated band conditions for receive training (0 = off) */
+    qrnLevel: number
+    qsbDepth: number
+    qrm: boolean
+    /** operator identity for the QSO simulator */
+    myCall: string
+    myName: string
   }
 }
 
@@ -64,6 +73,7 @@ function defaultState(): ProgressState {
     koch: { lesson: 1, window: [], attemptsInLesson: 0 },
     chars: {},
     phraseStreaks: {},
+    history: {},
     settings: {
       charWpm: 20,
       effectiveWpm: 10,
@@ -72,7 +82,12 @@ function defaultState(): ProgressState {
       volume: 0.6,
       groupSize: 5,
       keyType: 'iambic-a',
-      paddleReverse: false
+      paddleReverse: false,
+      qrnLevel: 0,
+      qsbDepth: 0,
+      qrm: false,
+      myCall: 'N0CALL',
+      myName: 'OP'
     }
   }
 }
@@ -86,7 +101,8 @@ function mergeSaved(saved: Partial<ProgressState>): ProgressState {
     koch: { ...base.koch, ...saved.koch },
     settings: { ...base.settings, ...saved.settings },
     chars: saved.chars ?? {},
-    phraseStreaks: saved.phraseStreaks ?? {}
+    phraseStreaks: saved.phraseStreaks ?? {},
+    history: saved.history ?? {}
   }
 }
 
@@ -211,14 +227,26 @@ export function useProgress() {
     p.lastPracticeDay = today
   }
 
+  function todayEntry() {
+    const key = new Date().toISOString().slice(0, 10)
+    const p = progress.value
+    const entry = p.history[key] ?? { answers: 0, correct: 0, xp: 0 }
+    p.history[key] = entry
+    return entry
+  }
+
   function addXp(amount: number) {
     progress.value.xp += amount
+    todayEntry().xp += amount
     touchStreak()
   }
 
   function recordAnswer(correct: boolean) {
     progress.value.totalAnswers++
     if (correct) progress.value.totalCorrect++
+    const entry = todayEntry()
+    entry.answers++
+    if (correct) entry.correct++
   }
 
   function recordCharAnswer(char: string, correct: boolean) {

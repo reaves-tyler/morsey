@@ -5,7 +5,9 @@ const pageLinks = [
   { to: '/', label: 'Dashboard', icon: 'i-lucide-layout-dashboard' },
   { to: '/learn', label: 'Learn', icon: 'i-lucide-graduation-cap' },
   { to: '/phrases', label: 'Phrases', icon: 'i-lucide-message-square-code' },
-  { to: '/send', label: 'Send', icon: 'i-lucide-radio-tower' }
+  { to: '/send', label: 'Send', icon: 'i-lucide-radio-tower' },
+  { to: '/qso', label: 'QSO', icon: 'i-lucide-antenna' },
+  { to: '/stats', label: 'Stats', icon: 'i-lucide-activity' }
 ]
 
 const mobileLinks = [
@@ -17,6 +19,7 @@ const mobileLinks = [
 
 <template>
   <UApp>
+    <NuxtPwaManifest />
     <div class="min-h-screen flex flex-col bg-zinc-950 text-zinc-100">
       <header class="sticky top-0 z-40 border-b border-zinc-800/80 bg-zinc-950/80 backdrop-blur">
         <div class="mx-auto flex max-w-5xl items-center justify-between gap-4 px-4 py-3">
@@ -70,13 +73,14 @@ const mobileLinks = [
           </div>
         </div>
 
-        <nav class="flex items-center justify-around border-t border-zinc-800/80 px-2 py-1.5 sm:hidden">
+        <nav class="flex items-center justify-around border-t border-zinc-800/80 px-1 py-1.5 sm:hidden">
           <NuxtLink
             v-for="link in mobileLinks"
             :key="link.to"
             :to="link.to"
-            class="flex flex-col items-center gap-0.5 rounded-md px-2 py-1 text-[11px] text-zinc-400"
+            class="flex flex-col items-center gap-0.5 rounded-md px-1.5 py-1 text-[10px] text-zinc-400"
             active-class="!text-emerald-400"
+            :aria-label="link.label"
           >
             <UIcon :name="link.icon" class="size-4" />
             {{ link.label }}

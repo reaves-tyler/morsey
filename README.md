@@ -15,10 +15,20 @@ On top of that, training is **gamified**: XP with levels, answer combos, a daily
 
 | Module | What it trains |
 |---|---|
-| **Koch Trainer** (`/learn`) | Receiving single characters (Listen & Choose grid or keyboard) and full 5-character groups (Copy mode) |
+| **Koch Trainer** (`/learn`) | Receiving single characters (Listen & Choose grid or keyboard), 5-character copy groups, whole **words** (top-100 English + ham shorthand, filtered to your unlocked letters), and realistic **callsigns** built from real ITU country prefixes |
 | **Ham Phrases** (`/phrases`) | Q-signals, prosigns (`AR`, `SK`, `BT`…), RST reports (`599`, `5NN`, `559`), and CW shorthand (`CQ`, `UR`, `73`, `QTH`, `DX`…) across six progressive tiers with mastery tracking |
-| **Sending Practice** (`/send`) | Keying with a straight key or iambic paddle — decoded in real time and validated against target characters/phrases |
+| **Sending Practice** (`/send`) | Keying with any key type — decoded in real time, validated against target characters/phrases, and graded by a **fist analysis** report (dah:dit weight vs the ideal 3:1, element-length consistency) |
+| **QSO Simulator** (`/qso`) | A complete scripted first contact: copy a CQ call, answer with your callsign, copy the RST/name/QTH exchange (sent twice, as on the air), key your half, and copy the 73/`SK` sign-off. Receive-only mode available |
+| **Stats** (`/stats`) | Per-character accuracy heatmap in Koch order and a 30-day activity chart (answers or XP per day) |
 | **Reference** (`/reference` + nav overlay) | Searchable legend of every character, prosign, and abbreviation — also opens as a slideover from any page (search by text, meaning, or pattern like `.-`), with one-click audio |
+
+## The keyer bar
+
+A radio-style control bar sits at the bottom of every page — collapsed it shows lit status pills (key type, REV, WPM, tone, band conditions, USB, TX); pulled up it's the rig menu:
+
+- **Key type**: straight (also sideswipers), bug (auto dits + manual dahs), iambic A, iambic B (Curtis-B memory) — plus paddle reverse. The hardware is always a dumb contact passthrough; this setting decides what the contacts mean, exactly like an HF transceiver's keyer menu.
+- **Band conditions**: simulated **QRN** (receiver-filtered atmospheric noise), **QSB** (slow fading), and **QRM** (a weaker off-frequency station) applied to receive training — train through the noise like the G4FON tradition.
+- **USB bridge**: connect, live TIP/RING contact-test LEDs, bridge-ready status, and an event counter for wiring-day debugging.
 
 ## Hardware support
 
@@ -27,6 +37,8 @@ On top of that, training is **gamified**: XP with levels, answer combos, a daily
 - No hardware? Use `Space` as a straight key, `[` / `]` (or Left/Right `Ctrl`) as paddles, or the on-screen touch key.
 
 The audio engine is the native **Web Audio API** — a pure sine sidetone (700 Hz default, adjustable) with 5 ms gain ramps so it never clicks.
+
+Morsey is also an installable **PWA**: every page and asset is precached by a service worker, so the whole trainer works offline once loaded.
 
 ## Development
 

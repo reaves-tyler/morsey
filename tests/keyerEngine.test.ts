@@ -10,7 +10,10 @@ import { KeyerEngine, type KeyerConfig } from '../app/utils/keyerEngine'
 
 function makeHarness(cfg: Partial<KeyerConfig> = {}) {
   const config: KeyerConfig = { keyType: 'iambic-a', paddleReverse: false, sendWpm: 12, ...cfg }
-  const state = { symbols: '', decoded: '', tone: false, toneCount: 0, adaptive: 0, preview: '' as string }
+  const state = {
+    symbols: '', decoded: '', tone: false, toneCount: 0, adaptive: 0, preview: '' as string,
+    manual: [] as { el: string, dur: number, gap: number }[]
+  }
   const engine = new KeyerEngine({
     now: () => Date.now(),
     setTimer: (fn, ms) => setTimeout(fn, ms),
@@ -26,7 +29,8 @@ function makeHarness(cfg: Partial<KeyerConfig> = {}) {
       if (state.decoded && !state.decoded.endsWith(' ')) state.decoded += ' '
     },
     onHoldPreview: (p) => { state.preview = p },
-    onAdaptiveDit: (ms) => { state.adaptive = ms }
+    onAdaptiveDit: (ms) => { state.adaptive = ms },
+    onManualElement: (el, dur, gap) => { state.manual.push({ el, dur, gap }) }
   })
   return { engine, config, state }
 }
@@ -97,6 +101,21 @@ describe('straight key', () => {
     expect(state.preview).toBe('-')
     engine.contactUp('tip')
     expect(state.preview).toBe('')
+  })
+
+  it('reports manual element timings for fist analysis', () => {
+    const { engine, state } = makeHarness({ keyType: 'straight' })
+    engine.contactDown('tip')
+    tick(80)
+    engine.contactUp('tip') // dit, first of run
+    tick(120)
+    engine.contactDown('tip')
+    tick(320)
+    engine.contactUp('tip') // dah, 120 ms gap before
+    expect(state.manual).toEqual([
+      { el: '.', dur: 80, gap: -1 },
+      { el: '-', dur: 320, gap: 120 }
+    ])
   })
 
   it('calibrates the dit estimate toward the operator', () => {

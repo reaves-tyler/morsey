@@ -54,6 +54,12 @@ export interface KeyerEngineHost {
   onHoldPreview(preview: '' | Element): void
   /** adaptive dit estimate moved (ms); fires with 0 on recalibration */
   onAdaptiveDit(ms: number): void
+  /**
+   * A manually-timed element completed (straight key, bug dahs) — for fist
+   * analysis. `gapBeforeMs` is silence since the previous manual element,
+   * or -1 for the first element of a run.
+   */
+  onManualElement?(el: Element, durMs: number, gapBeforeMs: number): void
 }
 
 /** Manual presses shorter than this are treated as contact bounce. */
@@ -76,6 +82,7 @@ export class KeyerEngine {
   private pressStart = 0
   private previewTimer: unknown = null
   private adaptiveDit = 0
+  private lastManualEnd = 0
 
   // electronic keyer (iambic A/B)
   private ditHeld = false
@@ -233,6 +240,9 @@ export class KeyerEngine {
     const est = this.estDit()
     const isDit = dur < est * 2
     this.pushSymbol(isDit ? '.' : '-')
+    const gapBefore = this.lastManualEnd > 0 ? this.pressStart - this.lastManualEnd : -1
+    this.lastManualEnd = this.host.now()
+    this.host.onManualElement?.(isDit ? '.' : '-', dur, gapBefore)
     // Calibrate toward this press: a dit implies its own length, a dah implies
     // a third of it. Blend 30% per press, clamped to sane bounds.
     const implied = isDit ? dur : dur / 3
@@ -329,6 +339,7 @@ export class KeyerEngine {
     if (this.manualDown || this.phase === 'tone') this.host.onToneEnd()
     this.host.onHoldPreview('')
     this.manualDown = false
+    this.lastManualEnd = 0
     this.ditHeld = false
     this.dahHeld = false
     this.bugHeld = false

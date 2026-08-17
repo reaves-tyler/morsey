@@ -99,6 +99,42 @@ async function connect() {
                 <USlider v-model="s.volume" :min="0.05" :max="1" :step="0.05" size="sm" class="flex-1" />
                 <span class="w-16 shrink-0 text-right font-mono text-xs text-emerald-400">{{ Math.round(s.volume * 100) }}%</span>
               </div>
+
+              <!-- Simulated band conditions (receive playback only) -->
+              <div class="border-t border-zinc-800 pt-3">
+                <div class="mb-2 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+                  Band conditions — train through the noise
+                </div>
+                <div class="space-y-3">
+                  <div class="flex items-center gap-3">
+                    <span class="w-14 shrink-0 font-mono text-[10px] uppercase tracking-widest text-zinc-500" title="Atmospheric static">QRN</span>
+                    <USlider v-model="s.qrnLevel" :min="0" :max="1" :step="0.05" size="sm" class="flex-1" />
+                    <span class="w-16 shrink-0 text-right font-mono text-xs" :class="s.qrnLevel > 0 ? 'text-amber-400' : 'text-zinc-600'">
+                      {{ s.qrnLevel > 0 ? Math.round(s.qrnLevel * 100) + '%' : 'OFF' }}
+                    </span>
+                  </div>
+                  <div class="flex items-center gap-3">
+                    <span class="w-14 shrink-0 font-mono text-[10px] uppercase tracking-widest text-zinc-500" title="Signal fading">QSB</span>
+                    <USlider v-model="s.qsbDepth" :min="0" :max="0.9" :step="0.05" size="sm" class="flex-1" />
+                    <span class="w-16 shrink-0 text-right font-mono text-xs" :class="s.qsbDepth > 0 ? 'text-amber-400' : 'text-zinc-600'">
+                      {{ s.qsbDepth > 0 ? Math.round(s.qsbDepth * 100) + '%' : 'OFF' }}
+                    </span>
+                  </div>
+                  <div class="flex items-center gap-3">
+                    <span class="w-14 shrink-0 font-mono text-[10px] uppercase tracking-widest text-zinc-500" title="Interfering station">QRM</span>
+                    <button
+                      class="rounded border px-3 py-1 font-mono text-[11px] uppercase tracking-wider transition"
+                      :class="s.qrm
+                        ? 'border-amber-500 bg-amber-500/15 text-amber-300 shadow-[0_0_10px_-2px_theme(colors.amber.500/60%)]'
+                        : 'border-zinc-700 bg-zinc-800/60 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200'"
+                      @click="s.qrm = !s.qrm"
+                    >
+                      {{ s.qrm ? 'ON — off-freq station' : 'OFF' }}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
               <p class="text-xs leading-snug text-zinc-500">{{ typeHint }}</p>
             </div>
 
@@ -118,6 +154,28 @@ async function connect() {
               <p v-else class="mt-2 max-w-44 text-xs leading-snug text-zinc-600">
                 Any key plugs into the Pico bridge — the bridge passes raw contacts through; this panel decides what they mean.
               </p>
+
+              <!-- Contact test: raw LEDs, no keyer logic — reacts to every
+                   input source, so it doubles as a wiring-day sanity check -->
+              <div class="mt-3 border-t border-zinc-800 pt-3">
+                <div class="mb-2 font-mono text-[10px] uppercase tracking-widest text-zinc-500">Contact test</div>
+                <div class="flex items-center gap-4">
+                  <span class="flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider" :class="keyer.tipActive.value ? 'text-emerald-300' : 'text-zinc-600'">
+                    <span class="size-2.5 rounded-full transition" :class="keyer.tipActive.value ? 'bg-emerald-400 shadow-[0_0_8px_theme(colors.emerald.400)]' : 'bg-zinc-700'" />
+                    Tip
+                  </span>
+                  <span class="flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider" :class="keyer.ringActive.value ? 'text-emerald-300' : 'text-zinc-600'">
+                    <span class="size-2.5 rounded-full transition" :class="keyer.ringActive.value ? 'bg-emerald-400 shadow-[0_0_8px_theme(colors.emerald.400)]' : 'bg-zinc-700'" />
+                    Ring
+                  </span>
+                </div>
+                <p v-if="keyer.serialConnected.value" class="mt-2 font-mono text-[11px] text-zinc-600">
+                  <span :class="keyer.bridgeReady.value ? 'text-emerald-400' : 'text-zinc-600'">
+                    {{ keyer.bridgeReady.value ? 'BRIDGE READY' : 'awaiting bridge…' }}
+                  </span>
+                  · {{ keyer.bridgeEvents.value }} events
+                </p>
+              </div>
             </div>
           </div>
         </div>
@@ -151,6 +209,13 @@ async function connect() {
         </span>
         <span class="hidden rounded-sm border border-zinc-700 bg-zinc-800/80 px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-zinc-300 sm:inline">
           {{ s.freq }} Hz
+        </span>
+        <span
+          v-for="cond in ([['QRN', s.qrnLevel > 0], ['QSB', s.qsbDepth > 0], ['QRM', s.qrm]] as const).filter(c => c[1])"
+          :key="cond[0]"
+          class="rounded-sm border border-amber-500/50 bg-amber-500/10 px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-amber-300"
+        >
+          {{ cond[0] }}
         </span>
         <span
           class="rounded-sm border px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider"

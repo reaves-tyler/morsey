@@ -21,6 +21,14 @@ const keyed = ref(false) // tone currently on (for UI)
 const holdPreview = ref<'' | '.' | '-'>('')
 const serialConnected = ref(false)
 const adaptiveDitMs = ref(0)
+/** live raw contact state — wiring-day LEDs (reacts to every input source) */
+const tipActive = ref(false)
+const ringActive = ref(false)
+/** USB bridge health */
+const bridgeReady = ref(false)
+const bridgeEvents = ref(0)
+/** manual element log for fist analysis (straight key / bug dahs) */
+const fistLog = ref<{ el: '.' | '-', dur: number, gap: number }[]>([])
 
 let engine: KeyerEngine | null = null
 let keyboardAttached = false
@@ -61,7 +69,11 @@ export function useKeyer() {
           if (decoded.value && !decoded.value.endsWith(' ')) decoded.value += ' '
         },
         onHoldPreview: p => { holdPreview.value = p },
-        onAdaptiveDit: ms => { adaptiveDitMs.value = ms }
+        onAdaptiveDit: ms => { adaptiveDitMs.value = ms },
+        onManualElement: (el, dur, gap) => {
+          fistLog.value.push({ el, dur, gap })
+          if (fistLog.value.length > 500) fistLog.value.shift()
+        }
       })
     }
     return engine
@@ -76,10 +88,18 @@ export function useKeyer() {
   }
 
   function contactDown(contact: Contact) {
+    if (contact === 'tip') tipActive.value = true
+    else ringActive.value = true
     getEngine().contactDown(contact)
   }
   function contactUp(contact: Contact) {
+    if (contact === 'tip') tipActive.value = false
+    else ringActive.value = false
     getEngine().contactUp(contact)
+  }
+
+  function clearFist() {
+    fistLog.value = []
   }
 
   function clear() {
@@ -142,11 +162,12 @@ export function useKeyer() {
 
   function handleSerialLine(line: string) {
     switch (line) {
-      case 'TIP_DOWN': contactDown('tip'); break
-      case 'TIP_UP': contactUp('tip'); break
-      case 'RING_DOWN': contactDown('ring'); break
-      case 'RING_UP': contactUp('ring'); break
-      // MORSEY_BRIDGE_READY and anything else: ignore
+      case 'TIP_DOWN': bridgeEvents.value++; contactDown('tip'); break
+      case 'TIP_UP': bridgeEvents.value++; contactUp('tip'); break
+      case 'RING_DOWN': bridgeEvents.value++; contactDown('ring'); break
+      case 'RING_UP': bridgeEvents.value++; contactUp('ring'); break
+      case 'MORSEY_BRIDGE_READY': bridgeReady.value = true; break
+      // anything else: ignore
     }
   }
 
@@ -185,6 +206,8 @@ export function useKeyer() {
       serialPort = await (navigator as any).serial.requestPort()
       await serialPort.open({ baudRate: 115200 })
       serialConnected.value = true
+      bridgeReady.value = false
+      bridgeEvents.value = 0
       serialReadLoop()
       return null
     } catch (err: any) {
@@ -206,6 +229,7 @@ export function useKeyer() {
       }
     }
     serialConnected.value = false
+    bridgeReady.value = false
   }
 
   return {
@@ -215,6 +239,12 @@ export function useKeyer() {
     holdPreview,
     dahThresholdMs,
     adaptiveDitMs,
+    tipActive,
+    ringActive,
+    bridgeReady,
+    bridgeEvents,
+    fistLog,
+    clearFist,
     serialConnected,
     serialSupported,
     keyType,

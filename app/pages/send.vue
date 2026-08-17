@@ -73,6 +73,53 @@ function switchMode(m: SendMode) {
   keyer.clear()
 }
 
+// ---- Fist analysis (manual keying only: straight key, bug dahs) --------------
+
+const manualKeying = computed(() => keyer.keyType.value === 'straight' || keyer.keyType.value === 'bug')
+
+const fist = computed(() => {
+  const log = keyer.fistLog.value
+  const dits = log.filter(e => e.el === '.').map(e => e.dur)
+  const dahs = log.filter(e => e.el === '-').map(e => e.dur)
+  if (dits.length < 4 || dahs.length < 3) return null
+  const mean = (a: number[]) => a.reduce((s, v) => s + v, 0) / a.length
+  const cv = (a: number[]) => {
+    const m = mean(a)
+    return Math.sqrt(a.reduce((s, v) => s + (v - m) ** 2, 0) / a.length) / m
+  }
+  const avgDit = mean(dits)
+  const avgDah = mean(dahs)
+  const ratio = avgDah / avgDit
+  // intra-letter gaps: silence shorter than ~2.5 dits (longer = letter spacing)
+  const gaps = log.filter(e => e.gap >= 0 && e.gap < avgDit * 2.5).map(e => e.gap)
+  return {
+    count: log.length,
+    avgDit: Math.round(avgDit),
+    avgDah: Math.round(avgDah),
+    ratio,
+    ditCv: Math.round(cv(dits) * 100),
+    dahCv: Math.round(cv(dahs) * 100),
+    avgGap: gaps.length >= 3 ? Math.round(mean(gaps)) : null,
+    gapUnits: gaps.length >= 3 ? mean(gaps) / avgDit : null
+  }
+})
+
+const ratioVerdict = computed(() => {
+  if (!fist.value) return null
+  const r = fist.value.ratio
+  if (r < 2.4) return { text: 'Dahs running short — stretch them out', ok: false }
+  if (r > 3.8) return { text: 'Dahs running long — a dah is exactly 3 dits', ok: false }
+  return { text: 'Good weight — dah:dit near the ideal 3:1', ok: true }
+})
+
+const steadinessVerdict = computed(() => {
+  if (!fist.value) return null
+  const worst = Math.max(fist.value.ditCv, fist.value.dahCv)
+  if (worst <= 18) return { text: 'Steady fist — very consistent element lengths', ok: true }
+  if (worst <= 35) return { text: 'Fair consistency — aim for identical dits every time', ok: true }
+  return { text: 'Erratic timing — slow down until every dit matches', ok: false }
+})
+
 onMounted(() => keyer.attach())
 onBeforeUnmount(() => {
   keyer.detach()
@@ -216,6 +263,67 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </div>
+    </UCard>
+
+    <!-- Fist analysis: only meaningful when the operator times the elements -->
+    <UCard v-if="manualKeying">
+      <div class="flex items-center justify-between">
+        <div>
+          <h2 class="font-medium">Fist analysis</h2>
+          <p class="text-sm text-zinc-500">How your hand-timed elements compare to ideal 1:3 morse.</p>
+        </div>
+        <UButton
+          v-if="keyer.fistLog.value.length" variant="ghost" color="neutral" size="xs"
+          @click="keyer.clearFist()"
+        >
+          Reset session
+        </UButton>
+      </div>
+
+      <p v-if="!fist" class="mt-4 text-sm text-zinc-600">
+        Key a bit more — the report needs at least a handful of dits and dahs
+        ({{ keyer.fistLog.value.length }} element{{ keyer.fistLog.value.length === 1 ? '' : 's' }} so far).
+      </p>
+
+      <template v-else>
+        <div class="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div class="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+            <div class="text-xs uppercase tracking-wide text-zinc-500">Avg dit</div>
+            <div class="mt-1 font-mono text-xl">{{ fist.avgDit }}<span class="text-xs text-zinc-500"> ms</span></div>
+            <div class="text-xs text-zinc-600">±{{ fist.ditCv }}% spread</div>
+          </div>
+          <div class="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+            <div class="text-xs uppercase tracking-wide text-zinc-500">Avg dah</div>
+            <div class="mt-1 font-mono text-xl">{{ fist.avgDah }}<span class="text-xs text-zinc-500"> ms</span></div>
+            <div class="text-xs text-zinc-600">±{{ fist.dahCv }}% spread</div>
+          </div>
+          <div class="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+            <div class="text-xs uppercase tracking-wide text-zinc-500">Dah : dit</div>
+            <div class="mt-1 font-mono text-xl" :class="ratioVerdict?.ok ? 'text-emerald-400' : 'text-amber-400'">
+              {{ fist.ratio.toFixed(1) }}<span class="text-xs text-zinc-500"> / 3.0</span>
+            </div>
+          </div>
+          <div class="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+            <div class="text-xs uppercase tracking-wide text-zinc-500">Element gap</div>
+            <div class="mt-1 font-mono text-xl">
+              <template v-if="fist.gapUnits !== null">{{ fist.gapUnits.toFixed(1) }}<span class="text-xs text-zinc-500"> / 1.0 u</span></template>
+              <template v-else>—</template>
+            </div>
+          </div>
+        </div>
+
+        <ul class="mt-4 space-y-1.5 text-sm">
+          <li v-for="v in [ratioVerdict, steadinessVerdict]" :key="v!.text" class="flex items-center gap-2">
+            <UIcon
+              :name="v!.ok ? 'i-lucide-circle-check' : 'i-lucide-circle-alert'"
+              class="size-4 shrink-0"
+              :class="v!.ok ? 'text-emerald-400' : 'text-amber-400'"
+            />
+            <span :class="v!.ok ? 'text-zinc-300' : 'text-amber-300'">{{ v!.text }}</span>
+          </li>
+        </ul>
+        <p class="mt-3 text-xs text-zinc-600">{{ fist.count }} elements analyzed this session.</p>
+      </template>
     </UCard>
   </div>
 </template>

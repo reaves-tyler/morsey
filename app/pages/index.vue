@@ -38,6 +38,22 @@ const modules = computed(() => [
     subtitle: 'Key with your keyboard, screen, or a USB paddle',
     stat: KEY_TYPE_LABELS[progress.value.settings.keyType],
     statLabel: 'key type'
+  },
+  {
+    to: '/qso',
+    icon: 'i-lucide-antenna',
+    title: 'QSO Simulator',
+    subtitle: 'A complete first contact — CQ to 73, both directions',
+    stat: progress.value.settings.myCall,
+    statLabel: 'your call'
+  },
+  {
+    to: '/stats',
+    icon: 'i-lucide-activity',
+    title: 'Stats',
+    subtitle: 'Per-character accuracy heatmap and daily activity',
+    stat: `${lifetimeAccuracy.value}%`,
+    statLabel: 'lifetime'
   }
 ])
 </script>
