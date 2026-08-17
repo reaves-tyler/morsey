@@ -219,6 +219,80 @@ describe('bug', () => {
   })
 })
 
+describe('feel knobs — the rig menu', () => {
+  it('weight stretches iambic dahs (dah = weight × dit)', () => {
+    // At weight 4 a dah is 400 ms. Holding dah for 450 ms covers one
+    // dah (400) but releases during its gap → single 'T'. At the standard
+    // weight 3 the same hold reaches a second dah → 'M'.
+    const heavy = makeHarness({ keyType: 'iambic-a', weight: 4 })
+    heavy.engine.contactDown('ring')
+    tick(450)
+    heavy.engine.contactUp('ring')
+    tick(1000)
+    expect(heavy.state.decoded).toBe('T')
+
+    const standard = makeHarness({ keyType: 'iambic-a' })
+    standard.engine.contactDown('ring')
+    tick(450)
+    standard.engine.contactUp('ring')
+    tick(1000)
+    expect(standard.state.decoded).toBe('M')
+  })
+
+  it('dah threshold moves the manual classification boundary', () => {
+    // 170 ms press at 12 WPM (unit 100 ms): below the default 200 ms
+    // threshold it's a dit; with the knob at 1.6 (=160 ms) it's a dah.
+    const tight = makeHarness({ keyType: 'straight', dahThresholdUnits: 1.6, adaptive: false })
+    tight.engine.contactDown('tip')
+    tick(170)
+    tight.engine.contactUp('tip')
+    expect(tight.state.symbols).toBe('-')
+
+    const standard = makeHarness({ keyType: 'straight', adaptive: false })
+    standard.engine.contactDown('tip')
+    tick(170)
+    standard.engine.contactUp('tip')
+    expect(standard.state.symbols).toBe('.')
+  })
+
+  it('adaptive off keeps a fixed threshold derived from the keyer speed', () => {
+    const { engine, state } = makeHarness({ keyType: 'straight', adaptive: false })
+    engine.contactDown('tip')
+    tick(150) // a slow dit that would normally recalibrate
+    engine.contactUp('tip')
+    expect(state.adaptive).toBe(0) // no calibration event
+    expect(engine.dahThresholdMs()).toBe(200) // still nominal 2 × 100 ms
+  })
+
+  it('debounce knob sets the chatter cutoff', () => {
+    const strict = makeHarness({ keyType: 'straight', debounceMs: 50 })
+    strict.engine.contactDown('tip')
+    tick(30)
+    strict.engine.contactUp('tip')
+    expect(strict.state.symbols).toBe('') // 30 ms discarded under a 50 ms floor
+
+    const loose = makeHarness({ keyType: 'straight', debounceMs: 10 })
+    loose.engine.contactDown('tip')
+    tick(30)
+    loose.engine.contactUp('tip')
+    expect(loose.state.symbols).toBe('.') // same press accepted
+  })
+
+  it('letter/word gap knobs change decoder patience', () => {
+    // letterGapUnits 3 at 12 WPM → commit at max(300, 3×112.5) = 337.5 ms
+    const quick = makeHarness({ keyType: 'straight', letterGapUnits: 3, wordGapUnits: 6 })
+    quick.engine.contactDown('tip')
+    tick(80)
+    quick.engine.contactUp('tip')
+    tick(330)
+    expect(quick.state.decoded).toBe('') // just before commit
+    tick(20)
+    expect(quick.state.decoded).toBe('E') // committed ~150 ms sooner than default
+    tick(600) // word gap at 6×150 = 900 total
+    expect(quick.state.decoded).toBe('E ')
+  })
+})
+
 describe('housekeeping', () => {
   it('clear() drops pending symbols so no letter commits', () => {
     const { engine, state } = makeHarness({ keyType: 'straight' })

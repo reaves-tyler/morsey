@@ -46,9 +46,12 @@ export function useKeyer() {
     import.meta.client && 'serial' in navigator
   )
   const keyType = computed<KeyType>(() => progress.value.settings.keyType)
-  const dahThresholdMs = computed(() =>
-    Math.round((adaptiveDitMs.value || (1.2 / progress.value.settings.sendWpm) * 1000) * 2)
-  )
+  const dahThresholdMs = computed(() => {
+    const s = progress.value.settings
+    const nominal = (1.2 / s.sendWpm) * 1000
+    const est = s.adaptiveDit ? (adaptiveDitMs.value || nominal) : nominal
+    return Math.round(est * s.dahThresholdUnits)
+  })
 
   function getEngine(): KeyerEngine {
     if (!engine) {
@@ -56,11 +59,20 @@ export function useKeyer() {
         now: () => performance.now(),
         setTimer: (fn, ms) => setTimeout(fn, ms),
         clearTimer: h => clearTimeout(h as ReturnType<typeof setTimeout>),
-        config: () => ({
-          keyType: progress.value.settings.keyType,
-          paddleReverse: progress.value.settings.paddleReverse,
-          sendWpm: progress.value.settings.sendWpm
-        }),
+        config: () => {
+          const s = progress.value.settings
+          return {
+            keyType: s.keyType,
+            paddleReverse: s.paddleReverse,
+            sendWpm: s.sendWpm,
+            debounceMs: s.debounceMs,
+            weight: s.keyerWeight,
+            dahThresholdUnits: s.dahThresholdUnits,
+            adaptive: s.adaptiveDit,
+            letterGapUnits: s.letterGapUnits,
+            wordGapUnits: s.wordGapUnits
+          }
+        },
         onToneStart: () => { keyed.value = true; audio.keyDown() },
         onToneEnd: () => { keyed.value = false; audio.keyUp() },
         onSymbols: s => { currentSymbols.value = s },

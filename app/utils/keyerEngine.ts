@@ -32,7 +32,42 @@ export interface KeyerConfig {
   paddleReverse: boolean
   /** electronic-keyer element speed; also seeds the manual classifier */
   sendWpm: number
+
+  // ---- Feel knobs (all optional — defaults reproduce a standard keyer). ----
+  // These mirror what real rigs and keyers expose in their CW menus.
+
+  /** contact debounce for manual keying in ms (straight key, bug dahs) — default 20 */
+  debounceMs?: number
+  /** dah length as a multiple of the dit, for iambic elements and manual
+   *  calibration (rigs call this keyer weight / dot-dash ratio, typically
+   *  adjustable 2.8-4.5; standard morse is 3.0) — default 3 */
+  weight?: number
+  /** manual classification boundary in dit-units: a press held at least this
+   *  many dits is a dah (midpoint of 1u and 3u = 2.0) — default 2 */
+  dahThresholdUnits?: number
+  /** calibrate the manual dit estimate toward the operator's fist — default true */
+  adaptive?: boolean
+  /** decoder patience: silence (in dit-units) before committing a letter —
+   *  default 4 (nominal spacing is 3; the margin absorbs a human fist) */
+  letterGapUnits?: number
+  /** silence (in dit-units) before a word boundary — default 8 (nominal 7) */
+  wordGapUnits?: number
 }
+
+/** Resolved feel defaults — a standard keyer. */
+export const FEEL_DEFAULTS = {
+  debounceMs: 20,
+  weight: 3,
+  dahThresholdUnits: 2,
+  adaptive: true,
+  letterGapUnits: 4,
+  wordGapUnits: 8
+} as const
+
+/** Per-dit-unit floor so decoder gaps never get twitchy at high keyer speeds:
+ *  at the default 4u/8u this reproduces the original 450 ms / 1.2 s floors. */
+const LETTER_GAP_FLOOR_PER_UNIT = 112.5
+const WORD_GAP_FLOOR_PER_UNIT = 150
 
 export interface KeyerEngineHost {
   /** monotonic-enough clock in ms */
@@ -62,8 +97,6 @@ export interface KeyerEngineHost {
   onManualElement?(el: Element, durMs: number, gapBeforeMs: number): void
 }
 
-/** Manual presses shorter than this are treated as contact bounce. */
-export const DEBOUNCE_MS = 20
 /** Adaptive dit estimate is clamped to this range (ms). */
 export const MIN_DIT_MS = 40
 export const MAX_DIT_MS = 300
@@ -102,19 +135,30 @@ export class KeyerEngine {
 
   // ---- Timing helpers --------------------------------------------------------
 
+  /** Feel knob accessor with defaults. */
+  private feel<K extends keyof typeof FEEL_DEFAULTS>(key: K): number | boolean {
+    return this.host.config()[key] ?? FEEL_DEFAULTS[key]
+  }
+
   /** Nominal dit length at the configured keyer speed. */
   ditMs(): number {
     return (1.2 / this.host.config().sendWpm) * 1000
   }
 
-  /** Manual classifier's current dit estimate (adaptive, falls back to nominal). */
+  /** Dah length: dit × weight (standard 3, rigs offer ~2.8-4.5). */
+  dahMs(): number {
+    return this.ditMs() * (this.feel('weight') as number)
+  }
+
+  /** Manual classifier's current dit estimate (adaptive when enabled, else nominal). */
   estDit(): number {
+    if (!this.feel('adaptive')) return this.ditMs()
     return this.adaptiveDit || this.ditMs()
   }
 
-  /** A manual press at or above this duration is a dah (midpoint of 1u and 3u). */
+  /** A manual press at or above this duration is a dah. */
   dahThresholdMs(): number {
-    return Math.round(this.estDit() * 2)
+    return Math.round(this.estDit() * (this.feel('dahThresholdUnits') as number))
   }
 
   /** Forget the operator calibration (call when sendWpm changes). */
@@ -140,11 +184,19 @@ export class KeyerEngine {
   private scheduleGapTimers() {
     this.clearGapTimers()
     const u = this.estDit()
-    // Generous gaps: nominal is 3u between letters and 7u between words, but a
-    // human fist pauses between elements too — wait ~4u (min 450 ms) before
-    // committing a letter, ~8u (min 1.2 s) before a word boundary.
-    this.letterTimer = this.host.setTimer(() => this.finalizeLetter(), Math.max(u * 4, 450))
-    this.wordTimer = this.host.setTimer(() => this.host.onWordGap(), Math.max(u * 8, 1200))
+    // Decoder patience: nominal spacing is 3u between letters and 7u between
+    // words, but a human fist pauses between elements too. The per-unit floor
+    // keeps gaps humane at high keyer speeds (defaults: 4u/450ms, 8u/1.2s).
+    const letterUnits = this.feel('letterGapUnits') as number
+    const wordUnits = this.feel('wordGapUnits') as number
+    this.letterTimer = this.host.setTimer(
+      () => this.finalizeLetter(),
+      Math.max(u * letterUnits, letterUnits * LETTER_GAP_FLOOR_PER_UNIT)
+    )
+    this.wordTimer = this.host.setTimer(
+      () => this.host.onWordGap(),
+      Math.max(u * wordUnits, wordUnits * WORD_GAP_FLOOR_PER_UNIT)
+    )
   }
 
   private finalizeLetter() {
@@ -232,22 +284,24 @@ export class KeyerEngine {
     this.previewTimer = null
     this.host.onHoldPreview('')
     const dur = this.host.now() - this.pressStart
-    if (dur < DEBOUNCE_MS) {
+    if (dur < (this.feel('debounceMs') as number)) {
       // Contact bounce — ignore, but keep waiting on the pending symbols
       this.scheduleGapTimers()
       return
     }
     const est = this.estDit()
-    const isDit = dur < est * 2
+    const isDit = dur < est * (this.feel('dahThresholdUnits') as number)
     this.pushSymbol(isDit ? '.' : '-')
     const gapBefore = this.lastManualEnd > 0 ? this.pressStart - this.lastManualEnd : -1
     this.lastManualEnd = this.host.now()
     this.host.onManualElement?.(isDit ? '.' : '-', dur, gapBefore)
-    // Calibrate toward this press: a dit implies its own length, a dah implies
-    // a third of it. Blend 30% per press, clamped to sane bounds.
-    const implied = isDit ? dur : dur / 3
-    this.adaptiveDit = Math.min(MAX_DIT_MS, Math.max(MIN_DIT_MS, est * 0.7 + implied * 0.3))
-    this.host.onAdaptiveDit(this.adaptiveDit)
+    if (this.feel('adaptive')) {
+      // Calibrate toward this press: a dit implies its own length, a dah
+      // implies dur/weight. Blend 30% per press, clamped to sane bounds.
+      const implied = isDit ? dur : dur / (this.feel('weight') as number)
+      this.adaptiveDit = Math.min(MAX_DIT_MS, Math.max(MIN_DIT_MS, est * 0.7 + implied * 0.3))
+      this.host.onAdaptiveDit(this.adaptiveDit)
+    }
     this.scheduleGapTimers()
   }
 
@@ -277,7 +331,7 @@ export class KeyerEngine {
     this.phase = 'tone'
     this.clearGapTimers()
     this.host.onToneStart()
-    this.elementTimer = this.host.setTimer(() => this.endElement(), el === '.' ? this.ditMs() : this.ditMs() * 3)
+    this.elementTimer = this.host.setTimer(() => this.endElement(), el === '.' ? this.ditMs() : this.dahMs())
   }
 
   private endElement() {

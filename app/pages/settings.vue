@@ -24,6 +24,18 @@ function doResetSettings() {
   setTimeout(() => { settingsResetDone.value = false }, 2000)
 }
 
+/** Restore just the keyer-feel knobs to a standard keyer. */
+function resetFeel() {
+  Object.assign(s.value, {
+    debounceMs: 20,
+    keyerWeight: 3,
+    dahThresholdUnits: 2,
+    adaptiveDit: true,
+    letterGapUnits: 4,
+    wordGapUnits: 8
+  })
+}
+
 // ---- Backup & restore --------------------------------------------------------
 
 const fileInput = ref<HTMLInputElement>()
@@ -141,6 +153,91 @@ function applyImport() {
           <span><strong class="text-zinc-200">Streaks, combos & XP:</strong> short daily sessions beat marathon cramming — the streak keeps you honest.</span>
         </li>
       </ul>
+    </UCard>
+
+    <UCard>
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 class="font-medium">Keyer feel</h2>
+          <p class="text-sm text-zinc-500">
+            The deep menu of a real rig's keyer — tune these until your key feels like the genuine article.
+            Key type, speed, and reverse live in the keyer bar below.
+          </p>
+        </div>
+        <UButton variant="soft" color="neutral" size="xs" icon="i-lucide-undo-2" @click="resetFeel">
+          Standard keyer
+        </UButton>
+      </div>
+
+      <div class="mt-5 space-y-6">
+        <div>
+          <div class="mb-2 flex items-center justify-between">
+            <label class="text-sm font-medium">Weight (dah : dit ratio)</label>
+            <span class="font-mono text-sm text-emerald-400">{{ s.keyerWeight.toFixed(1) }} : 1</span>
+          </div>
+          <USlider v-model="s.keyerWeight" :min="2.5" :max="4.5" :step="0.1" />
+          <p class="mt-1.5 text-xs text-zinc-500">
+            Iambic &amp; bug element length; also calibrates manual-dah classification. Standard morse is 3.0 —
+            rigs typically offer 2.8–4.5. Heavier weight sounds "fatter" on the air.
+          </p>
+        </div>
+
+        <div>
+          <div class="mb-2 flex items-center justify-between">
+            <label class="text-sm font-medium">Dah threshold</label>
+            <span class="font-mono text-sm text-emerald-400">{{ s.dahThresholdUnits.toFixed(2) }} dits</span>
+          </div>
+          <USlider v-model="s.dahThresholdUnits" :min="1.5" :max="2.5" :step="0.05" />
+          <p class="mt-1.5 text-xs text-zinc-500">
+            Straight key &amp; bug dahs: hold at least this many dit-lengths and the press classifies as a dah.
+            2.0 is the midpoint of a 1-unit dit and a 3-unit dah. Lower if your dahs read as dits.
+          </p>
+        </div>
+
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <label class="text-sm font-medium">Adaptive fist calibration</label>
+            <p class="mt-0.5 text-xs text-zinc-500">
+              Continuously calibrates the dit estimate toward your actual keying (straight/bug).
+              Turn off for a fixed threshold derived from the keyer speed — stricter, like keying a real rig.
+            </p>
+          </div>
+          <USwitch v-model="s.adaptiveDit" />
+        </div>
+
+        <div>
+          <div class="mb-2 flex items-center justify-between">
+            <label class="text-sm font-medium">Contact debounce</label>
+            <span class="font-mono text-sm text-emerald-400">{{ s.debounceMs }} ms</span>
+          </div>
+          <USlider v-model="s.debounceMs" :min="5" :max="50" :step="1" />
+          <p class="mt-1.5 text-xs text-zinc-500">
+            Manual presses shorter than this are discarded as contact chatter. Raise it for a bouncy
+            vintage key, lower it for clean keyboard sending. (The Pico bridge adds its own 5 ms.)
+          </p>
+        </div>
+
+        <div class="grid gap-6 sm:grid-cols-2">
+          <div>
+            <div class="mb-2 flex items-center justify-between">
+              <label class="text-sm font-medium">Letter gap</label>
+              <span class="font-mono text-sm text-emerald-400">{{ s.letterGapUnits.toFixed(1) }} dits</span>
+            </div>
+            <USlider v-model="s.letterGapUnits" :min="3" :max="8" :step="0.5" />
+          </div>
+          <div>
+            <div class="mb-2 flex items-center justify-between">
+              <label class="text-sm font-medium">Word gap</label>
+              <span class="font-mono text-sm text-emerald-400">{{ s.wordGapUnits.toFixed(0) }} dits</span>
+            </div>
+            <USlider v-model="s.wordGapUnits" :min="6" :max="16" :step="1" />
+          </div>
+        </div>
+        <p class="-mt-3 text-xs text-zinc-500">
+          Decoder patience: how much silence commits a letter (nominal 3 dits) or inserts a space (nominal 7).
+          Tighten as your spacing improves — a real skimmer expects true 3/7 spacing.
+        </p>
+      </div>
     </UCard>
 
     <UCard>

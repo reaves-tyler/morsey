@@ -19,12 +19,15 @@ const KEY_TYPES: KeyType[] = ['straight', 'bug', 'iambic-a', 'iambic-b']
 
 const usesPaddles = computed(() => s.value.keyType !== 'straight')
 
-const typeHint = computed(() => ({
-  'straight': 'Tone follows the contact — you time everything. Keyboard: hold Space.',
-  'bug': 'Dit lever streams automatic dits at keyer speed; dah lever is manual, like a straight key. Keyboard: [ = dits, ] = dahs.',
-  'iambic-a': 'Electronic keyer, squeeze alternates. Release stops after the element in progress. Keyboard: [ and ] (or Left/Right Ctrl).',
-  'iambic-b': 'As A, plus Curtis-B memory: releasing a squeeze mid-element sends one extra opposite element. Keyboard: [ and ] (or Left/Right Ctrl).'
-}[s.value.keyType]))
+const typeHint = computed(() => {
+  const threshold = ` Release under ${keyer.dahThresholdMs.value} ms = dit, longer = dah${s.value.adaptiveDit ? ' (adapts to your fist)' : ''}.`
+  return {
+    'straight': `Tone follows the contact — you time everything. Keyboard: hold Space.${threshold}`,
+    'bug': `Dit lever streams automatic dits at keyer speed; dah lever is manual.${threshold} Keyboard: [ = dits, ] = dahs.`,
+    'iambic-a': 'Electronic keyer, squeeze alternates. Release stops after the element in progress. Keyboard: [ and ] (or Left/Right Ctrl).',
+    'iambic-b': 'As A, plus Curtis-B memory: releasing a squeeze mid-element sends one extra opposite element. Keyboard: [ and ] (or Left/Right Ctrl).'
+  }[s.value.keyType] + ' Fine-tune weight, thresholds, debounce, and decoder gaps under Settings → Keyer feel.'
+})
 
 async function connect() {
   serialError.value = ''

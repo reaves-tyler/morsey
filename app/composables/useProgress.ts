@@ -41,6 +41,13 @@ export interface ProgressState {
     keyType: KeyType
     /** swap tip/ring roles (standard is tip = dit) */
     paddleReverse: boolean
+    /** keyer feel knobs — see KeyerConfig in utils/keyerEngine.ts */
+    debounceMs: number
+    keyerWeight: number
+    dahThresholdUnits: number
+    adaptiveDit: boolean
+    letterGapUnits: number
+    wordGapUnits: number
     /** simulated band conditions for receive training (0 = off) */
     qrnLevel: number
     qsbDepth: number
@@ -83,6 +90,12 @@ function defaultState(): ProgressState {
       groupSize: 5,
       keyType: 'iambic-a',
       paddleReverse: false,
+      debounceMs: 20,
+      keyerWeight: 3,
+      dahThresholdUnits: 2,
+      adaptiveDit: true,
+      letterGapUnits: 4,
+      wordGapUnits: 8,
       qrnLevel: 0,
       qsbDepth: 0,
       qrm: false,
