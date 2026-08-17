@@ -243,11 +243,55 @@ export function useKeyer() {
   }
 
   // ---- Web Serial ----------------------------------------------------------
+  //
+  // Two hardware flavors are supported on the same port:
+  //  - passive paddles wired to the control lines: CTS = dit, DSR = dah
+  //    (detected by polling getSignals)
+  //  - microcontroller bridges (hardware/pico-bridge) that send text lines:
+  //    DIT_DOWN / DIT_UP / DAH_DOWN / DAH_UP
 
   let serialPort: any = null
   let serialPoll: ReturnType<typeof setInterval> | null = null
+  let serialReader: any = null
   let lastCts = false
   let lastDsr = false
+
+  function handleSerialLine(line: string) {
+    switch (line) {
+      case 'DIT_DOWN': inputDown('primary'); break
+      case 'DIT_UP': inputUp('primary'); break
+      case 'DAH_DOWN': inputDown('secondary'); break
+      case 'DAH_UP': inputUp('secondary'); break
+      // MORSEY_BRIDGE_READY and anything else: ignore
+    }
+  }
+
+  async function serialReadLoop() {
+    const decoder = new TextDecoder()
+    let buffer = ''
+    try {
+      while (serialPort?.readable) {
+        serialReader = serialPort.readable.getReader()
+        try {
+          while (true) {
+            const { value, done } = await serialReader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+            let nl
+            while ((nl = buffer.indexOf('\n')) !== -1) {
+              handleSerialLine(buffer.slice(0, nl).trim())
+              buffer = buffer.slice(nl + 1)
+            }
+          }
+        } finally {
+          serialReader.releaseLock()
+          serialReader = null
+        }
+      }
+    } catch {
+      // Port gone (unplugged) — a cancel() from disconnectSerial also lands here
+    }
+  }
 
   async function connectSerial(): Promise<string | null> {
     if (!serialSupported.value) {
@@ -259,6 +303,7 @@ export function useKeyer() {
       // Raise DTR/RTS so a passive paddle circuit has voltage to switch
       await serialPort.setSignals({ dataTerminalReady: true, requestToSend: true })
       serialConnected.value = true
+      serialReadLoop()
       serialPoll = setInterval(async () => {
         if (!serialPort) return
         try {
@@ -290,8 +335,15 @@ export function useKeyer() {
       serialPoll = null
     }
     if (serialPort) {
-      try { serialPort.close() } catch { /* already closed */ }
-      serialPort = null
+      const port = serialPort
+      serialPort = null // stop the read loop from re-acquiring a reader
+      if (serialReader) {
+        // cancel() releases the lock and unblocks read(); close after
+        try { serialReader.cancel().catch(() => {}).finally(() => port.close().catch(() => {})) }
+        catch { /* reader already gone */ }
+      } else {
+        try { port.close() } catch { /* already closed */ }
+      }
     }
     serialConnected.value = false
     lastCts = false
