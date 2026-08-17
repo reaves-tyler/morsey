@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { KOCH_ORDER, TOTAL_LESSONS } from '~/utils/morse'
 import { PHRASE_TIERS } from '~/utils/abbreviations'
+import { KEY_TYPE_LABELS } from '~/composables/useProgress'
 
 const {
   progress, level, levelProgress, xpToNextLevel, unlockedChars,
@@ -35,8 +36,8 @@ const modules = computed(() => [
     icon: 'i-lucide-radio-tower',
     title: 'Sending Practice',
     subtitle: 'Key with your keyboard, screen, or a USB paddle',
-    stat: progress.value.settings.keyerMode === 'straight' ? 'Straight' : 'Paddle',
-    statLabel: 'keyer mode'
+    stat: KEY_TYPE_LABELS[progress.value.settings.keyType],
+    statLabel: 'key type'
   }
 ])
 </script>

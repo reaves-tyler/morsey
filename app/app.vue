@@ -84,13 +84,15 @@ const mobileLinks = [
         </nav>
       </header>
 
-      <main class="mx-auto w-full max-w-5xl flex-1 px-4 py-8">
+      <main class="mx-auto w-full max-w-5xl flex-1 px-4 py-8 pb-20">
         <NuxtPage />
       </main>
 
-      <footer class="border-t border-zinc-800/80 py-4 text-center font-mono text-xs text-zinc-600">
+      <footer class="border-t border-zinc-800/80 py-4 pb-14 text-center font-mono text-xs text-zinc-600">
         73 DE MORSEY <span class="text-zinc-700">·-·-·</span> CW trainer — Koch method · Farnsworth timing
       </footer>
+
+      <KeyerBar />
     </div>
   </UApp>
 </template>

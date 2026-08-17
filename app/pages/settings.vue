@@ -98,31 +98,6 @@ function applyImport() {
 
         <div>
           <div class="mb-2 flex items-center justify-between">
-            <label class="text-sm font-medium">Sending speed</label>
-            <span class="font-mono text-sm text-emerald-400">{{ s.sendWpm }} WPM</span>
-          </div>
-          <USlider v-model="s.sendWpm" :min="8" :max="30" :step="1" />
-          <p class="mt-1.5 text-xs text-zinc-500">Paddle element timing and straight-key dit/dah threshold. Independent of listening speed — the decoder also adapts to your fist as you key.</p>
-        </div>
-
-        <div>
-          <div class="mb-2 flex items-center justify-between">
-            <label class="text-sm font-medium">Sidetone pitch</label>
-            <span class="font-mono text-sm text-emerald-400">{{ s.freq }} Hz</span>
-          </div>
-          <USlider v-model="s.freq" :min="400" :max="1000" :step="10" />
-        </div>
-
-        <div>
-          <div class="mb-2 flex items-center justify-between">
-            <label class="text-sm font-medium">Volume</label>
-            <span class="font-mono text-sm text-emerald-400">{{ Math.round(s.volume * 100) }}%</span>
-          </div>
-          <USlider v-model="s.volume" :min="0.05" :max="1" :step="0.05" />
-        </div>
-
-        <div>
-          <div class="mb-2 flex items-center justify-between">
             <label class="text-sm font-medium">Copy-mode group size</label>
             <span class="font-mono text-sm text-emerald-400">{{ s.groupSize }} chars</span>
           </div>
@@ -138,6 +113,11 @@ function applyImport() {
             Test tone (PARIS)
           </UButton>
         </div>
+
+        <p class="text-xs text-zinc-500">
+          Sending-side settings — key type, iambic mode, paddle reverse, keyer speed, sidetone pitch,
+          and volume — live in the <span class="font-mono uppercase tracking-wider text-emerald-400">keyer</span> bar at the bottom of every page.
+        </p>
       </div>
     </UCard>
 

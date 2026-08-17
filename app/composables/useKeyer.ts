@@ -1,25 +1,35 @@
 import { REVERSE_MORSE } from '~/utils/morse'
+import type { KeyType } from '~/composables/useProgress'
 
 /**
- * Sending-side keyer: turns physical inputs (keyboard, mouse/touch, or a USB
- * key via the Web Serial API) into dits and dahs, then decodes them into text.
+ * Sending-side keyer: turns physical contact closures into dits and dahs,
+ * then decodes them into text.
  *
- * Two modes:
- *  - straight: one input, timing measured from how long you hold it
- *  - paddle: two inputs; the electronic keyer generates perfectly timed
- *    elements, squeezing both alternates dit/dah (iambic)
+ * The hardware is always dumb — any key (straight, sideswiper, bug, single or
+ * dual paddle) is just one or two momentary contacts reaching us via the
+ * keyboard, the on-screen keys, or the USB bridge (hardware/pico-bridge)
+ * over Web Serial. What those contacts MEAN is decided here, by the
+ * `keyType` setting — exactly like the keyer menu on an HF transceiver:
  *
- * Timing is based on the dedicated *sending* speed (settings.sendWpm), not the
- * receive/character speed — humans key far slower than they can copy. On top
- * of that, straight-key classification is adaptive: every press nudges the
- * dit-length estimate toward the operator's actual fist, and the letter/word
- * commit gaps are stretched (with generous floors) so the decoder waits for
- * you to finish a character instead of committing between elements.
+ *  - straight:  any contact = the key. Tone follows the closure; the operator
+ *               does all timing (also covers sideswipers/cooties).
+ *  - bug:       dit contact produces an automatic dit stream at sendWpm while
+ *               held; dah contact behaves like a straight key (manual dahs) —
+ *               the classic semi-automatic emulation.
+ *  - iambic-a:  electronic keyer; squeeze alternates. Releasing both stops
+ *               after the element in progress.
+ *  - iambic-b:  as A, plus the Curtis-B memory: releasing both mid-element
+ *               after a squeeze sends ONE extra opposite element.
  *
- * Hardware notes: most cheap USB CW interfaces enumerate as a keyboard or
- * mouse, which the keyboard/mouse bindings already capture. Serial-wired
- * paddles assert the CTS (dit) and DSR (dah) control lines, which we poll
- * through navigator.serial.
+ * `paddleReverse` swaps the tip/ring roles (standard wiring is tip = dit).
+ * Manual timing (straight key, bug dahs) is classified against an adaptive
+ * dit-length estimate that calibrates to the operator's fist; letter/word
+ * commit gaps are stretched (4u/8u with 450 ms / 1.2 s floors) so the decoder
+ * waits for a character to finish. Backspace clears.
+ *
+ * All state is module-level: the keyer bar and the send page share one keyer
+ * and one serial connection, which survives page navigation like a rig
+ * staying plugged in.
  */
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
@@ -30,34 +40,67 @@ const DEBOUNCE_MS = 20
 const MIN_DIT_MS = 40
 const MAX_DIT_MS = 300
 
+/** Physical contact on the plug: tip or ring (sleeve is ground). */
+export type Contact = 'tip' | 'ring'
+
+// ---- Shared state (one keyer for the whole app) -----------------------------
+
+const decoded = ref('')
+const currentSymbols = ref('')
+const keyed = ref(false) // tone currently on (for UI)
+/** Live classification of a manual element being held ('.' or '-'). */
+const holdPreview = ref<'' | '.' | '-'>('')
+const serialConnected = ref(false)
+const adaptiveDitMs = ref(0)
+
+let letterTimer: ReturnType<typeof setTimeout> | null = null
+let wordTimer: ReturnType<typeof setTimeout> | null = null
+let generation = 0 // bumped on detach to kill in-flight element loops
+let keyboardAttached = false
+let speedWatcherAttached = false
+
+// manual keying (straight key; the dah lever of a bug)
+let pressStart = 0
+let manualDown = false
+let holdTimer: ReturnType<typeof setTimeout> | null = null
+
+// electronic keyer (iambic A/B)
+let ditPaddle = false
+let dahPaddle = false
+let sending = false
+let lastElement: '.' | '-' = '-'
+/** Curtis-B memory: extra element owed after a squeeze released mid-element */
+let memoryEl: '.' | '-' | null = null
+
+// bug auto-dit stream
+let bugDit = false
+
+// Web Serial handles (survive navigation)
+let serialPort: any = null
+let serialReader: any = null
+
 export function useKeyer() {
   const { progress } = useProgress()
   const audio = useMorseAudio()
 
-  const decoded = ref('')
-  const currentSymbols = ref('')
-  const keyed = ref(false) // tone currently on (for UI)
-  /** Live classification of the element being held right now ('.' or '-'). */
-  const holdPreview = ref<'' | '.' | '-'>('')
-  const serialConnected = ref(false)
   const serialSupported = computed(() =>
     import.meta.client && 'serial' in navigator
   )
 
+  const keyType = computed<KeyType>(() => progress.value.settings.keyType)
+
   /** Nominal dit length at the configured sending speed. */
   const sendDitMs = computed(() => (1.2 / progress.value.settings.sendWpm) * 1000)
 
-  /** Adaptive dit length, calibrated to the operator's actual keying. */
-  const adaptiveDitMs = ref(0)
-  watch(sendDitMs, () => { adaptiveDitMs.value = 0 }) // recalibrate on speed change
+  if (!speedWatcherAttached) {
+    speedWatcherAttached = true
+    watch(sendDitMs, () => { adaptiveDitMs.value = 0 }) // recalibrate on speed change
+  }
   function estDit(): number {
     return adaptiveDitMs.value || sendDitMs.value
   }
-  /** A press at or above this duration is a dah (midpoint of 1u and 3u). */
+  /** A manual press at or above this duration is a dah (midpoint of 1u and 3u). */
   const dahThresholdMs = computed(() => Math.round((adaptiveDitMs.value || sendDitMs.value) * 2))
-
-  let letterTimer: ReturnType<typeof setTimeout> | null = null
-  let wordTimer: ReturnType<typeof setTimeout> | null = null
 
   function clearGapTimers() {
     if (letterTimer) clearTimeout(letterTimer)
@@ -89,15 +132,11 @@ export function useKeyer() {
     currentSymbols.value += symbol
   }
 
-  // ---- Straight key --------------------------------------------------------
+  // ---- Manual keying ---------------------------------------------------------
 
-  let pressStart = 0
-  let straightDown = false
-  let holdTimer: ReturnType<typeof setTimeout> | null = null
-
-  function straightDownHandler() {
-    if (straightDown) return
-    straightDown = true
+  function manualDownHandler() {
+    if (manualDown) return
+    manualDown = true
     clearGapTimers() // never commit a letter while the key is down
     pressStart = performance.now()
     keyed.value = true
@@ -105,14 +144,14 @@ export function useKeyer() {
     // hold crosses the threshold, so the operator can see the boundary.
     holdPreview.value = '.'
     holdTimer = setTimeout(() => {
-      if (straightDown) holdPreview.value = '-'
+      if (manualDown) holdPreview.value = '-'
     }, dahThresholdMs.value)
     audio.keyDown()
   }
 
-  function straightUpHandler() {
-    if (!straightDown) return
-    straightDown = false
+  function manualUpHandler() {
+    if (!manualDown) return
+    manualDown = false
     audio.keyUp()
     keyed.value = false
     if (holdTimer) clearTimeout(holdTimer)
@@ -136,66 +175,126 @@ export function useKeyer() {
     scheduleGapTimers()
   }
 
-  // ---- Iambic paddle -------------------------------------------------------
+  // ---- Electronic keyer (iambic A/B) ----------------------------------------
 
-  let ditPaddle = false
-  let dahPaddle = false
-  let sending = false
-  let lastElement: '.' | '-' = '-'
-  let generation = 0 // bumped on detach to kill in-flight loops
-
-  function setPaddle(side: 'dit' | 'dah', pressed: boolean) {
-    if (side === 'dit') ditPaddle = pressed
+  function setPaddle(role: 'dit' | 'dah', pressed: boolean) {
+    if (role === 'dit') ditPaddle = pressed
     else dahPaddle = pressed
-    if (pressed && !sending) keyerLoop()
+    if (pressed && !sending) iambicLoop()
   }
 
-  async function keyerLoop() {
+  /** Wait `ms`, sampling the paddles so mode B can arm its element memory. */
+  async function sampledWait(ms: number, currentEl: '.' | '-', modeB: boolean, gen: number) {
+    const t0 = performance.now()
+    while (performance.now() - t0 < ms) {
+      await sleep(5)
+      if (gen !== generation) return
+      if (modeB && ditPaddle && dahPaddle) {
+        memoryEl = currentEl === '.' ? '-' : '.'
+      }
+    }
+  }
+
+  async function iambicLoop() {
     sending = true
     const gen = generation
     clearGapTimers()
+    const modeB = keyType.value === 'iambic-b'
     while (gen === generation) {
       let el: '.' | '-' | null = null
       if (ditPaddle && dahPaddle) el = lastElement === '.' ? '-' : '.'
       else if (ditPaddle) el = '.'
       else if (dahPaddle) el = '-'
+      else if (modeB && memoryEl) el = memoryEl
       if (!el) break
+      memoryEl = null
       lastElement = el
       keyed.value = true
       audio.keyDown()
-      await sleep(el === '.' ? sendDitMs.value : sendDitMs.value * 3)
+      await sampledWait(el === '.' ? sendDitMs.value : sendDitMs.value * 3, el, modeB, gen)
       audio.keyUp()
       keyed.value = false
       if (gen !== generation) return
       pushSymbol(el)
+      await sampledWait(sendDitMs.value, el, modeB, gen)
+    }
+    sending = false
+    memoryEl = null
+    scheduleGapTimers()
+  }
+
+  // ---- Bug: automatic dit stream ---------------------------------------------
+
+  async function bugLoop() {
+    sending = true
+    const gen = generation
+    clearGapTimers()
+    while (gen === generation && bugDit) {
+      keyed.value = true
+      audio.keyDown()
+      await sleep(sendDitMs.value)
+      audio.keyUp()
+      keyed.value = false
+      if (gen !== generation) return
+      pushSymbol('.')
       await sleep(sendDitMs.value)
     }
     sending = false
     scheduleGapTimers()
   }
 
-  // ---- Input routing -------------------------------------------------------
+  // ---- Contact routing ---------------------------------------------------------
+  // Everything physical lands here as a tip or ring closure; keyType decides
+  // what it means (like the radio's keyer menu).
 
-  const mode = computed(() => progress.value.settings.keyerMode)
-
-  function inputDown(input: 'primary' | 'secondary') {
-    if (mode.value === 'straight') straightDownHandler()
-    else setPaddle(input === 'primary' ? 'dit' : 'dah', true)
-  }
-
-  function inputUp(input: 'primary' | 'secondary') {
-    if (mode.value === 'straight') straightUpHandler()
-    else setPaddle(input === 'primary' ? 'dit' : 'dah', false)
-  }
-
-  // Keyboard bindings: straight = Space; paddle = "[" or LeftCtrl for dit,
-  // "]" or RightCtrl for dah. USB keyers that emulate keyboards/mice land here.
-  function keyFor(e: KeyboardEvent): 'primary' | 'secondary' | null {
-    if (mode.value === 'straight') {
-      return e.code === 'Space' ? 'primary' : null
+  function roleOf(contact: Contact): 'key' | 'dit' | 'dah' | null {
+    if (keyType.value === 'straight') {
+      // Tip only: a mono plug permanently shorts ring to sleeve, which would
+      // otherwise read as a stuck contact. Sideswipers wire both arms to tip.
+      return contact === 'tip' ? 'key' : null
     }
-    if (e.code === 'BracketLeft' || e.code === 'ControlLeft') return 'primary'
-    if (e.code === 'BracketRight' || e.code === 'ControlRight') return 'secondary'
+    const isDit = (contact === 'tip') !== progress.value.settings.paddleReverse
+    return isDit ? 'dit' : 'dah'
+  }
+
+  function contactDown(contact: Contact) {
+    const role = roleOf(contact)
+    if (!role) return
+    if (role === 'key') return manualDownHandler()
+    if (keyType.value === 'bug') {
+      if (role === 'dit') {
+        bugDit = true
+        if (!sending) bugLoop()
+      } else {
+        manualDownHandler() // bug dahs are manual
+      }
+      return
+    }
+    setPaddle(role, true)
+  }
+
+  function contactUp(contact: Contact) {
+    const role = roleOf(contact)
+    if (!role) return
+    if (role === 'key') return manualUpHandler()
+    if (keyType.value === 'bug') {
+      if (role === 'dit') bugDit = false
+      else manualUpHandler()
+      return
+    }
+    setPaddle(role, false)
+  }
+
+  // ---- Keyboard input ----------------------------------------------------------
+  // Straight: Space = the key. Other types: "[" / LeftCtrl = tip,
+  // "]" / RightCtrl = ring. USB keyers emulating keyboards land here too.
+
+  function keyFor(e: KeyboardEvent): Contact | null {
+    if (keyType.value === 'straight') {
+      return e.code === 'Space' ? 'tip' : null
+    }
+    if (e.code === 'BracketLeft' || e.code === 'ControlLeft') return 'tip'
+    if (e.code === 'BracketRight' || e.code === 'ControlRight') return 'ring'
     return null
   }
 
@@ -206,27 +305,29 @@ export function useKeyer() {
       clear()
       return
     }
-    const input = keyFor(e)
-    if (!input) return
+    const contact = keyFor(e)
+    if (!contact) return
     e.preventDefault()
-    inputDown(input)
+    contactDown(contact)
   }
 
   function onKeyUp(e: KeyboardEvent) {
-    const input = keyFor(e)
-    if (!input) return
+    const contact = keyFor(e)
+    if (!contact) return
     e.preventDefault()
-    inputUp(input)
+    contactUp(contact)
   }
 
   function attach() {
-    if (!import.meta.client) return
+    if (!import.meta.client || keyboardAttached) return
+    keyboardAttached = true
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup', onKeyUp)
   }
 
   function detach() {
     if (!import.meta.client) return
+    keyboardAttached = false
     window.removeEventListener('keydown', onKeyDown)
     window.removeEventListener('keyup', onKeyUp)
     generation++
@@ -237,31 +338,23 @@ export function useKeyer() {
     holdPreview.value = ''
     ditPaddle = false
     dahPaddle = false
+    memoryEl = null
+    bugDit = false
     sending = false
-    straightDown = false
-    disconnectSerial()
+    manualDown = false
+    // Serial stays connected across pages — like a rig staying plugged in
   }
 
-  // ---- Web Serial ----------------------------------------------------------
-  //
-  // Two hardware flavors are supported on the same port:
-  //  - passive paddles wired to the control lines: CTS = dit, DSR = dah
-  //    (detected by polling getSignals)
-  //  - microcontroller bridges (hardware/pico-bridge) that send text lines:
-  //    DIT_DOWN / DIT_UP / DAH_DOWN / DAH_UP
-
-  let serialPort: any = null
-  let serialPoll: ReturnType<typeof setInterval> | null = null
-  let serialReader: any = null
-  let lastCts = false
-  let lastDsr = false
+  // ---- Web Serial (USB bridge) --------------------------------------------------
+  // The bridge (hardware/pico-bridge) is a dumb passthrough: it reports raw
+  // TIP/RING contact closures as text lines and knows nothing about morse.
 
   function handleSerialLine(line: string) {
     switch (line) {
-      case 'DIT_DOWN': inputDown('primary'); break
-      case 'DIT_UP': inputUp('primary'); break
-      case 'DAH_DOWN': inputDown('secondary'); break
-      case 'DAH_UP': inputUp('secondary'); break
+      case 'TIP_DOWN': contactDown('tip'); break
+      case 'TIP_UP': contactUp('tip'); break
+      case 'RING_DOWN': contactDown('ring'); break
+      case 'RING_UP': contactUp('ring'); break
       // MORSEY_BRIDGE_READY and anything else: ignore
     }
   }
@@ -299,29 +392,9 @@ export function useKeyer() {
     }
     try {
       serialPort = await (navigator as any).serial.requestPort()
-      await serialPort.open({ baudRate: 9600 })
-      // Raise DTR/RTS so a passive paddle circuit has voltage to switch
-      await serialPort.setSignals({ dataTerminalReady: true, requestToSend: true })
+      await serialPort.open({ baudRate: 115200 })
       serialConnected.value = true
       serialReadLoop()
-      serialPoll = setInterval(async () => {
-        if (!serialPort) return
-        try {
-          const s = await serialPort.getSignals()
-          const cts = !!s.clearToSend
-          const dsr = !!(s.dataSetReady || s.dataCarrierDetect)
-          if (cts !== lastCts) {
-            lastCts = cts
-            cts ? inputDown('primary') : inputUp('primary')
-          }
-          if (dsr !== lastDsr) {
-            lastDsr = dsr
-            dsr ? inputDown('secondary') : inputUp('secondary')
-          }
-        } catch {
-          disconnectSerial()
-        }
-      }, 5)
       return null
     } catch (err: any) {
       serialPort = null
@@ -330,10 +403,6 @@ export function useKeyer() {
   }
 
   function disconnectSerial() {
-    if (serialPoll) {
-      clearInterval(serialPoll)
-      serialPoll = null
-    }
     if (serialPort) {
       const port = serialPort
       serialPort = null // stop the read loop from re-acquiring a reader
@@ -346,8 +415,6 @@ export function useKeyer() {
       }
     }
     serialConnected.value = false
-    lastCts = false
-    lastDsr = false
   }
 
   function clear() {
@@ -365,10 +432,11 @@ export function useKeyer() {
     adaptiveDitMs,
     serialConnected,
     serialSupported,
+    keyType,
     attach,
     detach,
-    inputDown,
-    inputUp,
+    contactDown,
+    contactUp,
     connectSerial,
     disconnectSerial,
     clear

@@ -35,8 +35,20 @@ export interface ProgressState {
     freq: number
     volume: number
     groupSize: number
-    keyerMode: 'straight' | 'paddle'
+    /** how the keyer interprets the key's contact closures, like a rig's keyer menu */
+    keyType: KeyType
+    /** swap tip/ring roles (standard is tip = dit) */
+    paddleReverse: boolean
   }
+}
+
+export type KeyType = 'straight' | 'bug' | 'iambic-a' | 'iambic-b'
+
+export const KEY_TYPE_LABELS: Record<KeyType, string> = {
+  'straight': 'Straight',
+  'bug': 'Bug',
+  'iambic-a': 'Iambic A',
+  'iambic-b': 'Iambic B'
 }
 
 const STORAGE_KEY = 'morsey-progress-v1'
@@ -59,7 +71,8 @@ function defaultState(): ProgressState {
       freq: 700,
       volume: 0.6,
       groupSize: 5,
-      keyerMode: 'straight'
+      keyType: 'iambic-a',
+      paddleReverse: false
     }
   }
 }

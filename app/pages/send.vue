@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { PHRASE_TIERS } from '~/utils/abbreviations'
 import { patternFor, wordPattern } from '~/utils/morse'
+import { KEY_TYPE_LABELS } from '~/composables/useProgress'
 
 const { progress, unlockedChars, unlockedTierCount, addXp } = useProgress()
 const keyer = useKeyer()
@@ -15,18 +16,7 @@ const showHint = ref(false)
 const sessionCorrect = ref(0)
 const sessionTotal = ref(0)
 const lastXpGain = ref(0)
-const serialError = ref('')
 let advanceTimer: ReturnType<typeof setTimeout> | null = null
-
-const keyerMode = computed({
-  get: () => progress.value.settings.keyerMode,
-  set: (v: 'straight' | 'paddle') => { progress.value.settings.keyerMode = v }
-})
-
-const sendWpm = computed({
-  get: () => progress.value.settings.sendWpm,
-  set: (v: number) => { progress.value.settings.sendWpm = v }
-})
 
 // Phrases eligible for sending practice: plain abbreviations from unlocked
 // tiers (prosigns are excluded — merged characters don't decode letter by
@@ -83,12 +73,6 @@ function switchMode(m: SendMode) {
   keyer.clear()
 }
 
-async function connectSerial() {
-  serialError.value = ''
-  const err = await keyer.connectSerial()
-  if (err) serialError.value = err
-}
-
 onMounted(() => keyer.attach())
 onBeforeUnmount(() => {
   keyer.detach()
@@ -102,7 +86,8 @@ onBeforeUnmount(() => {
       <div>
         <h1 class="text-2xl font-semibold tracking-tight">Sending Practice</h1>
         <p class="mt-1 text-sm text-zinc-400">
-          Key with your keyboard, the on-screen key, or a physical USB paddle. Morsey decodes your fist in real time.
+          Key with your keyboard, the on-screen key, or a real key through the USB bridge.
+          Configure key type and speed in the <span class="font-mono text-xs uppercase tracking-wider text-emerald-400">keyer</span> bar below.
         </p>
       </div>
       <div class="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900 p-1">
@@ -119,82 +104,13 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <!-- Input configuration -->
-    <UCard>
-      <div class="flex flex-wrap items-center justify-between gap-4">
-        <div class="flex items-center gap-4">
-          <div class="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950 p-1">
-            <UButton
-              :variant="keyerMode === 'straight' ? 'solid' : 'ghost'"
-              :color="keyerMode === 'straight' ? 'primary' : 'neutral'"
-              size="xs"
-              @click="keyerMode = 'straight'"
-            >
-              Straight key
-            </UButton>
-            <UButton
-              :variant="keyerMode === 'paddle' ? 'solid' : 'ghost'"
-              :color="keyerMode === 'paddle' ? 'primary' : 'neutral'"
-              size="xs"
-              @click="keyerMode = 'paddle'"
-            >
-              Iambic paddle
-            </UButton>
-          </div>
-          <p class="text-xs text-zinc-500">
-            <template v-if="keyerMode === 'straight'">
-              Hold <kbd class="rounded bg-zinc-800 px-1.5 py-0.5 font-mono">Space</kbd> —
-              release under {{ keyer.dahThresholdMs.value }} ms = dit, hold longer = dah.
-              The threshold adapts to your fist as you key.
-            </template>
-            <template v-else>
-              <kbd class="rounded bg-zinc-800 px-1.5 py-0.5 font-mono">[</kbd> / left
-              <kbd class="rounded bg-zinc-800 px-1.5 py-0.5 font-mono">Ctrl</kbd> = dit ·
-              <kbd class="rounded bg-zinc-800 px-1.5 py-0.5 font-mono">]</kbd> / right
-              <kbd class="rounded bg-zinc-800 px-1.5 py-0.5 font-mono">Ctrl</kbd> = dah · squeeze both = alternate
-            </template>
-          </p>
-        </div>
-        <div class="flex items-center gap-2">
-          <UBadge v-if="keyer.serialConnected.value" color="primary" variant="subtle">
-            <UIcon name="i-lucide-usb" class="size-3.5" /> Serial connected
-          </UBadge>
-          <UButton
-            v-if="!keyer.serialConnected.value"
-            variant="soft" color="neutral" size="sm" icon="i-lucide-usb"
-            @click="connectSerial"
-          >
-            Connect USB key
-          </UButton>
-          <UButton
-            v-else variant="soft" color="neutral" size="sm"
-            @click="keyer.disconnectSerial()"
-          >
-            Disconnect
-          </UButton>
-        </div>
-      </div>
-      <p v-if="serialError" class="mt-2 text-xs text-rose-400">{{ serialError }}</p>
-
-      <div class="mt-4 flex items-center gap-4 border-t border-zinc-800/80 pt-4">
-        <label class="shrink-0 text-sm font-medium">Sending speed</label>
-        <USlider v-model="sendWpm" :min="8" :max="30" :step="1" class="max-w-xs flex-1" size="sm" />
-        <span class="shrink-0 font-mono text-sm text-emerald-400">{{ sendWpm }} WPM</span>
-        <span class="hidden text-xs text-zinc-600 sm:inline">Slower = more forgiving timing. Independent of your listening speed.</span>
-      </div>
-
-      <p class="mt-3 text-xs text-zinc-600">
-        USB keyers that emulate a keyboard or mouse work without connecting — just start keying.
-        Serial-wired paddles use the CTS (dit) and DSR (dah) lines via the Web Serial API.
-      </p>
-    </UCard>
-
     <!-- Challenge target -->
     <UCard v-if="sendMode !== 'free'">
       <div class="flex flex-col items-center gap-4 py-4">
         <div v-if="challengeState === 'idle'" class="flex flex-col items-center gap-4">
           <p class="text-sm text-zinc-400">
-            Morsey shows you a {{ sendMode === 'chars' ? 'character' : 'phrase' }} — you send it.
+            Morsey shows you a {{ sendMode === 'chars' ? 'character' : 'phrase' }} — you send it
+            with your {{ KEY_TYPE_LABELS[keyer.keyType.value].toLowerCase() }} key.
           </p>
           <UButton color="primary" size="lg" icon="i-lucide-play" @click="nextTarget">
             Start sending
@@ -237,17 +153,17 @@ onBeforeUnmount(() => {
     <!-- Key + decoded output -->
     <UCard>
       <div class="flex flex-col items-center gap-6 py-4">
-        <!-- On-screen key(s) -->
+        <!-- On-screen key(s): left = tip, right = ring, same as the plug -->
         <div class="flex gap-4">
-          <template v-if="keyerMode === 'straight'">
+          <template v-if="keyer.keyType.value === 'straight'">
             <button
               class="flex size-32 select-none items-center justify-center rounded-full border-4 font-semibold uppercase tracking-wide transition active:scale-95"
               :class="keyer.keyed.value
                 ? 'border-emerald-400 bg-emerald-500/20 text-emerald-300'
                 : 'border-zinc-700 bg-zinc-900 text-zinc-400'"
-              @pointerdown.prevent="keyer.inputDown('primary')"
-              @pointerup.prevent="keyer.inputUp('primary')"
-              @pointerleave="keyer.inputUp('primary')"
+              @pointerdown.prevent="keyer.contactDown('tip')"
+              @pointerup.prevent="keyer.contactUp('tip')"
+              @pointerleave="keyer.contactUp('tip')"
               @contextmenu.prevent
             >
               Key
@@ -255,22 +171,24 @@ onBeforeUnmount(() => {
           </template>
           <template v-else>
             <button
-              class="flex h-32 w-24 select-none items-center justify-center rounded-l-3xl border-4 font-mono text-2xl transition active:scale-95 border-zinc-700 bg-zinc-900 text-zinc-400 active:border-emerald-400 active:text-emerald-300"
-              @pointerdown.prevent="keyer.inputDown('primary')"
-              @pointerup.prevent="keyer.inputUp('primary')"
-              @pointerleave="keyer.inputUp('primary')"
+              class="flex h-32 w-24 select-none flex-col items-center justify-center gap-1 rounded-l-3xl border-4 border-zinc-700 bg-zinc-900 font-mono text-zinc-400 transition active:scale-95 active:border-emerald-400 active:text-emerald-300"
+              @pointerdown.prevent="keyer.contactDown('tip')"
+              @pointerup.prevent="keyer.contactUp('tip')"
+              @pointerleave="keyer.contactUp('tip')"
               @contextmenu.prevent
             >
-              ·
+              <span class="text-2xl">{{ progress.settings.paddleReverse ? '−' : '·' }}</span>
+              <span class="text-[10px] uppercase tracking-widest text-zinc-600">tip</span>
             </button>
             <button
-              class="flex h-32 w-24 select-none items-center justify-center rounded-r-3xl border-4 font-mono text-2xl transition active:scale-95 border-zinc-700 bg-zinc-900 text-zinc-400 active:border-emerald-400 active:text-emerald-300"
-              @pointerdown.prevent="keyer.inputDown('secondary')"
-              @pointerup.prevent="keyer.inputUp('secondary')"
-              @pointerleave="keyer.inputUp('secondary')"
+              class="flex h-32 w-24 select-none flex-col items-center justify-center gap-1 rounded-r-3xl border-4 border-zinc-700 bg-zinc-900 font-mono text-zinc-400 transition active:scale-95 active:border-emerald-400 active:text-emerald-300"
+              @pointerdown.prevent="keyer.contactDown('ring')"
+              @pointerup.prevent="keyer.contactUp('ring')"
+              @pointerleave="keyer.contactUp('ring')"
               @contextmenu.prevent
             >
-              −
+              <span class="text-2xl">{{ progress.settings.paddleReverse ? '·' : '−' }}</span>
+              <span class="text-[10px] uppercase tracking-widest text-zinc-600">ring</span>
             </button>
           </template>
         </div>
@@ -289,10 +207,10 @@ onBeforeUnmount(() => {
             </UButton>
           </div>
           <div class="min-h-16 rounded-lg border border-zinc-800 bg-zinc-950 p-4 font-mono text-xl tracking-wider">
-            <span class="text-zinc-100">{{ keyer.decoded.value || ' ' }}</span>
+            <span class="text-zinc-100">{{ keyer.decoded.value || ' ' }}</span>
             <span class="text-emerald-400">{{ keyer.currentSymbols.value }}</span>
-            <!-- Live preview of the element being held: starts as a dit, flips
-                 to a dah the instant the hold crosses the threshold -->
+            <!-- Live preview of a manual element being held: starts as a dit,
+                 flips to a dah the instant the hold crosses the threshold -->
             <span v-if="keyer.holdPreview.value" class="morsey-pulse text-amber-400">{{ keyer.holdPreview.value }}</span>
             <span v-else-if="keyer.keyed.value" class="morsey-pulse text-emerald-400">▊</span>
           </div>
