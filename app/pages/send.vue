@@ -5,9 +5,18 @@ import { KEY_TYPE_LABELS } from '~/composables/useProgress'
 
 const { progress, unlockedChars, unlockedTierCount, addXp } = useProgress()
 const keyer = useKeyer()
+const audio = useMorseAudio()
 
 type SendMode = 'free' | 'chars' | 'phrases'
 const sendMode = ref<SendMode>('chars')
+
+/**
+ * shown: the target is displayed and you key it (reading → sending).
+ * echo:  the target is PLAYED and you key back what you heard — trains the
+ *        full receive→transmit loop, like answering a station on the air.
+ */
+type ChallengeStyle = 'shown' | 'echo'
+const challengeStyle = ref<ChallengeStyle>('shown')
 
 type ChallengeState = 'idle' | 'keying' | 'correct' | 'wrong'
 const challengeState = ref<ChallengeState>('idle')
@@ -30,6 +39,7 @@ const sendablePhrases = computed(() =>
 function nextTarget() {
   if (advanceTimer) clearTimeout(advanceTimer)
   keyer.clear()
+  audio.stop()
   showHint.value = false
   if (sendMode.value === 'chars') {
     const chars = unlockedChars.value
@@ -43,6 +53,17 @@ function nextTarget() {
     target.value = pool[Math.floor(Math.random() * pool.length)]!.send
   }
   challengeState.value = 'keying'
+  if (challengeStyle.value === 'echo') audio.playText(target.value)
+}
+
+function startChallenge(style: ChallengeStyle) {
+  challengeStyle.value = style
+  nextTarget()
+}
+
+function replayTarget() {
+  if (challengeState.value !== 'keying') return
+  audio.playText(target.value)
 }
 
 const targetClean = computed(() => target.value.trim().toUpperCase())
@@ -55,14 +76,17 @@ watch(keyer.decoded, (val) => {
   sessionTotal.value++
   if (correct) {
     sessionCorrect.value++
-    lastXpGain.value = sendMode.value === 'chars' ? 20 : 40
+    // Echo pays more: it exercises the whole receive→transmit loop
+    const base = sendMode.value === 'chars' ? 20 : 40
+    lastXpGain.value = challengeStyle.value === 'echo' ? base * 1.5 : base
     addXp(lastXpGain.value)
     challengeState.value = 'correct'
-    advanceTimer = setTimeout(nextTarget, 900)
+    advanceTimer = setTimeout(nextTarget, challengeStyle.value === 'echo' ? 1400 : 900)
   } else {
     lastXpGain.value = 0
     challengeState.value = 'wrong'
-    advanceTimer = setTimeout(nextTarget, 1800)
+    // Echo reveals the answer on a miss — give it a moment to sink in
+    advanceTimer = setTimeout(nextTarget, challengeStyle.value === 'echo' ? 2600 : 1800)
   }
 })
 
@@ -71,6 +95,7 @@ function switchMode(m: SendMode) {
   challengeState.value = 'idle'
   target.value = ''
   keyer.clear()
+  audio.stop()
 }
 
 // ---- Fist analysis (manual keying only: straight key, bug dahs) --------------
@@ -123,6 +148,7 @@ const steadinessVerdict = computed(() => {
 onMounted(() => keyer.attach())
 onBeforeUnmount(() => {
   keyer.detach()
+  audio.stop()
   if (advanceTimer) clearTimeout(advanceTimer)
 })
 </script>
@@ -156,15 +182,32 @@ onBeforeUnmount(() => {
       <div class="flex flex-col items-center gap-4 py-4">
         <div v-if="challengeState === 'idle'" class="flex flex-col items-center gap-4">
           <p class="text-sm text-zinc-400">
-            Morsey shows you a {{ sendMode === 'chars' ? 'character' : 'phrase' }} — you send it
-            with your {{ KEY_TYPE_LABELS[keyer.keyType.value].toLowerCase() }} key.
+            Two ways to drill {{ sendMode === 'chars' ? 'characters' : 'phrases' }} with your
+            {{ KEY_TYPE_LABELS[keyer.keyType.value].toLowerCase() }} key:
           </p>
-          <UButton color="primary" size="lg" icon="i-lucide-play" @click="nextTarget">
-            Start sending
-          </UButton>
+          <div class="grid w-full max-w-lg gap-3 sm:grid-cols-2">
+            <button
+              class="group flex flex-col items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-900 p-4 transition hover:border-emerald-500/60"
+              @click="startChallenge('shown')"
+            >
+              <UIcon name="i-lucide-eye" class="size-6 text-emerald-400" />
+              <span class="font-medium">See it → key it</span>
+              <span class="text-xs text-zinc-500">The target is shown on screen. Trains letter → rhythm recall.</span>
+            </button>
+            <button
+              class="group flex flex-col items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-900 p-4 transition hover:border-emerald-500/60"
+              @click="startChallenge('echo')"
+            >
+              <UIcon name="i-lucide-ear" class="size-6 text-amber-400" />
+              <span class="font-medium">Hear it → key it</span>
+              <span class="text-xs text-zinc-500">The target is only played. Copy by ear, key it back — the full QSO loop. +50% XP.</span>
+            </button>
+          </div>
         </div>
         <template v-else>
-          <div class="text-xs uppercase tracking-wide text-zinc-500">Send this</div>
+          <div class="text-xs uppercase tracking-wide text-zinc-500">
+            {{ challengeStyle === 'echo' && challengeState === 'keying' ? 'Key back what you hear' : 'Send this' }}
+          </div>
           <div
             class="rounded-xl border-2 px-8 py-4 font-mono text-4xl tracking-widest transition"
             :class="{
@@ -173,7 +216,12 @@ onBeforeUnmount(() => {
               'border-rose-500 bg-rose-500/10 text-rose-300 morsey-bad': challengeState === 'wrong'
             }"
           >
-            {{ target }}
+            <!-- Echo hides the target while keying — the answer reveals on
+                 result (or via Show answer) -->
+            <template v-if="challengeStyle === 'echo' && challengeState === 'keying' && !showHint">
+              <UIcon name="i-lucide-ear" class="size-9 text-amber-400/80" />
+            </template>
+            <template v-else>{{ target }}</template>
           </div>
           <div class="h-5 text-sm">
             <span v-if="challengeState === 'correct'" class="text-emerald-400">Clean fist! +{{ lastXpGain }} XP</span>
@@ -183,8 +231,16 @@ onBeforeUnmount(() => {
             <span v-else class="text-zinc-500">{{ sessionCorrect }} / {{ sessionTotal }} this session</span>
           </div>
           <div class="flex items-center gap-2">
+            <UButton
+              v-if="challengeStyle === 'echo'"
+              variant="soft" color="neutral" size="sm" icon="i-lucide-rotate-ccw"
+              :disabled="challengeState !== 'keying'"
+              @click="replayTarget"
+            >
+              Replay
+            </UButton>
             <UButton variant="soft" color="neutral" size="sm" icon="i-lucide-eye" @click="showHint = !showHint">
-              {{ showHint ? 'Hide' : 'Show' }} pattern
+              {{ showHint ? 'Hide' : (challengeStyle === 'echo' ? 'Show answer' : 'Show pattern') }}
             </UButton>
             <UButton variant="soft" color="neutral" size="sm" icon="i-lucide-skip-forward" @click="nextTarget">
               Skip
