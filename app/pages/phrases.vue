@@ -3,13 +3,11 @@ import { PHRASE_TIERS, type Phrase } from '~/utils/abbreviations'
 import { shuffle, wordPattern } from '~/utils/morse'
 import { PHRASE_MASTERY, TIER_UNLOCK } from '~/composables/useProgress'
 
-const { progress, unlockedTierCount, addXp, recordPhraseAnswer } = useProgress()
+const { progress, unlockedChars, unlockedTierCount, addXp, recordPhraseAnswer } = useProgress()
 const audio = useMorseAudio()
 
 const activeTierIndex = ref(0)
-onMounted(() => {
-  activeTierIndex.value = unlockedTierCount.value - 1
-})
+const userPickedTier = ref(false)
 
 const activeTier = computed(() => PHRASE_TIERS[activeTierIndex.value]!)
 
@@ -26,6 +24,28 @@ const combo = ref(0)
 const lastXpGain = ref(0)
 const showStudyList = ref(false)
 let advanceTimer: ReturnType<typeof setTimeout> | null = null
+
+// Follow the newest unlocked tier until the user picks one themselves.
+// A watcher (not onMounted) because progress loads from localStorage AFTER
+// mount — at mount time unlockedTierCount still reflects the default state.
+watch(unlockedTierCount, (count) => {
+  if (!userPickedTier.value && quizState.value === 'idle') {
+    activeTierIndex.value = count - 1
+  }
+}, { immediate: true })
+
+// Characters in this tier that the Koch trainer hasn't taught yet (digits,
+// mostly) — worth a heads-up so a plateau doesn't read as a bug
+const untaughtChars = computed(() => {
+  const known = new Set(unlockedChars.value)
+  const used = new Set<string>()
+  for (const item of activeTier.value.items) {
+    for (const c of item.send.replace(/[<>\s]/g, '')) {
+      if (!known.has(c)) used.add(c)
+    }
+  }
+  return [...used].sort()
+})
 
 function streakFor(item: Phrase) {
   return progress.value.phraseStreaks[item.abbr] ?? 0
@@ -108,11 +128,15 @@ function submitTyped() {
 
 function selectTier(i: number) {
   if (i >= unlockedTierCount.value) return
+  userPickedTier.value = true
   activeTierIndex.value = i
   quizState.value = 'idle'
   target.value = null
   audio.stop()
 }
+
+/** Streak state of the phrase just answered, for the feedback line. */
+const targetStreak = computed(() => (target.value ? streakFor(target.value) : 0))
 
 onBeforeUnmount(() => {
   if (advanceTimer) clearTimeout(advanceTimer)
@@ -186,6 +210,14 @@ onBeforeUnmount(() => {
         size="sm"
         class="mt-4"
       />
+      <p v-if="untaughtChars.length" class="mt-3 flex items-start gap-1.5 text-xs text-amber-400/90">
+        <UIcon name="i-lucide-info" class="mt-0.5 size-3.5 shrink-0" />
+        <span>
+          This tier uses characters the Koch trainer hasn't taught you yet
+          (<span class="font-mono">{{ untaughtChars.join(' ') }}</span>) — a plateau here is
+          normal, not a bug. They'll click once those arrive in your lessons.
+        </span>
+      </p>
     </UCard>
 
     <UCard>
@@ -213,9 +245,13 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="h-5 text-sm">
-          <span v-if="quizState === 'correct'" class="text-emerald-400">Correct! +{{ lastXpGain }} XP</span>
+          <span v-if="quizState === 'correct'" class="text-emerald-400">
+            Correct! +{{ lastXpGain }} XP
+            <span v-if="targetStreak >= PHRASE_MASTERY" class="text-amber-400">· {{ target?.abbr }} mastered ★</span>
+            <span v-else class="text-zinc-400">· {{ target?.abbr }} streak {{ targetStreak }}/{{ PHRASE_MASTERY }}</span>
+          </span>
           <span v-else-if="quizState === 'wrong'" class="text-rose-400">
-            That was <span class="font-mono font-semibold">{{ target?.abbr }}</span> — hear it again…
+            That was <span class="font-mono font-semibold">{{ target?.abbr }}</span> — streak reset, hear it again…
           </span>
           <span v-else-if="quizState === 'answering' && answerMode === 'choose'" class="text-zinc-400">What did you hear?</span>
           <span v-else-if="quizState === 'answering'" class="text-zinc-400">Type the abbreviation you heard.</span>

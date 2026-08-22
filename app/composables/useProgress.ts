@@ -29,6 +29,8 @@ export interface ProgressState {
   phraseStreaks: Record<string, number>
   /** daily activity aggregates, keyed by ISO date (for the stats page) */
   history: Record<string, { answers: number, correct: number, xp: number }>
+  /** high-water mark of unlocked phrase tiers — once open, a tier stays open */
+  tierHighWater: number
   settings: {
     charWpm: number
     effectiveWpm: number
@@ -81,6 +83,7 @@ function defaultState(): ProgressState {
     chars: {},
     phraseStreaks: {},
     history: {},
+    tierHighWater: 1,
     settings: {
       charWpm: 20,
       effectiveWpm: 10,
@@ -138,6 +141,18 @@ export function parseProgressJson(json: string): { state: ProgressState } | { er
     return { error: 'That file does not look like a Morsey progress backup (missing xp/koch fields).' }
   }
   return { state: mergeSaved(p) }
+}
+
+/** Tier count earned purely from current mastery (before the high-water mark). */
+function rawTierCount(streaks: Record<string, number>): number {
+  let unlocked = 1
+  for (let i = 0; i < PHRASE_TIERS.length - 1; i++) {
+    const tier = PHRASE_TIERS[i]!
+    const mastered = tier.items.filter(item => (streaks[item.abbr] ?? 0) >= PHRASE_MASTERY).length
+    if (mastered / tier.items.length >= TIER_UNLOCK) unlocked = i + 2
+    else break
+  }
+  return unlocked
 }
 
 let persistenceAttached = false
@@ -201,18 +216,11 @@ export function useProgress() {
       .map(([abbr]) => abbr)
   )
 
-  const unlockedTierCount = computed(() => {
-    let unlocked = 1
-    for (let i = 0; i < PHRASE_TIERS.length - 1; i++) {
-      const tier = PHRASE_TIERS[i]!
-      const mastered = tier.items.filter(
-        item => (progress.value.phraseStreaks[item.abbr] ?? 0) >= PHRASE_MASTERY
-      ).length
-      if (mastered / tier.items.length >= TIER_UNLOCK) unlocked = i + 2
-      else break
-    }
-    return unlocked
-  })
+  // Once open, a tier stays open (high-water mark) — review mistakes on an
+  // earlier tier must never re-lock the tier you're currently working on
+  const unlockedTierCount = computed(() =>
+    Math.max(rawTierCount(progress.value.phraseStreaks), progress.value.tierHighWater)
+  )
 
   const lifetimeAccuracy = computed(() =>
     progress.value.totalAnswers === 0
@@ -286,6 +294,8 @@ export function useProgress() {
   function recordPhraseAnswer(abbr: string, correct: boolean) {
     const p = progress.value
     p.phraseStreaks[abbr] = correct ? (p.phraseStreaks[abbr] ?? 0) + 1 : 0
+    const raw = rawTierCount(p.phraseStreaks)
+    if (raw > p.tierHighWater) p.tierHighWater = raw
     recordAnswer(correct)
   }
 

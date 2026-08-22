@@ -40,6 +40,7 @@ describe('parseProgressJson', () => {
     expect(state.settings.keyType).toBe('iambic-a')
     expect(state.settings.qrnLevel).toBe(0)
     expect(state.settings.myCall).toBe('N0CALL')
+    expect(state.tierHighWater).toBe(1)
     // keyer feel knobs (newest additions)
     expect(state.settings.debounceMs).toBe(20)
     expect(state.settings.keyerWeight).toBe(3)
