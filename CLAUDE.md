@@ -1,6 +1,6 @@
 # Morsey — CLAUDE.md
 
-Gamified morse code (CW) trainer for amateur radio. Static Nuxt 4 app, no backend — all state lives in browser localStorage. Live at https://morsey.net/ (GitHub Pages behind a custom domain; the old https://reaves-tyler.github.io/morsey/ URL 301s there).
+Gamified morse code (CW) trainer for amateur radio. Static Nuxt 4 app, no backend — all state lives in browser localStorage. Licensed AGPL-3.0-or-later (`LICENSE`; Tyler chose copyleft deliberately so the project stays free downstream — don't propose relicensing). Live at https://morsey.net/ (GitHub Pages behind a custom domain; the old https://reaves-tyler.github.io/morsey/ URL 301s there).
 
 ## Commands
 

@@ -18,7 +18,7 @@ type Faq = { q: string; a: string; link?: { href: string; label: string } }
 const faq: Faq[] = [
   {
     q: 'Is Morsey really free?',
-    a: 'Yes. Morsey is free and open source, with no account, no ads and no tracking. Your progress is stored in your own browser, and you can export it as a file. Once installed as a web app it works offline.'
+    a: 'Yes. Morsey is free software under the GNU Affero General Public License (AGPL-3.0), which means it stays free for everyone: anyone who shares or hosts a modified version has to share their source too. There is no account, no ads and no tracking. Your progress is stored in your own browser, and you can export it as a file. Once installed as a web app it works offline.'
   },
   {
     q: 'What is the Koch method, and why are the characters so fast?',

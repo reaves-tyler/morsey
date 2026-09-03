@@ -50,7 +50,7 @@ useHead({
             browserRequirements: 'Requires JavaScript and Web Audio. Web Serial (Chrome/Edge) for USB keys.',
             isAccessibleForFree: true,
             offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD', availability: 'https://schema.org/InStock' },
-            license: 'https://github.com/reaves-tyler/morsey',
+            license: 'https://www.gnu.org/licenses/agpl-3.0.html',
             codeRepository: 'https://github.com/reaves-tyler/morsey',
             keywords: [
               'morse code trainer', 'CW trainer', 'learn morse code', 'Koch method', 'Farnsworth timing',

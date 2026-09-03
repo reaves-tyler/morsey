@@ -49,13 +49,18 @@ Morsey is also an installable **PWA**: every page and asset is precached by a se
 ## Development
 
 ```bash
-npm install
-npm run dev        # http://localhost:3000
-npm run generate   # static build in .output/public
+pnpm install
+pnpm dev            # http://localhost:3000
+pnpm run generate   # static build in .output/public
+pnpm test           # keyer engine + CW decoder test suites
 ```
 
 ## Deployment
 
-Pushes to `main` deploy automatically to **GitHub Pages** via `.github/workflows/deploy.yml` (static `nuxt build --preset github_pages`, base URL set from the repo name). One-time setup: in the repo settings, set **Pages → Source → GitHub Actions**.
+Pushes to `main` deploy automatically to **GitHub Pages** via `.github/workflows/deploy.yml` (static `nuxt build --preset github_pages`, served from the custom domain **morsey.net**). One-time setup: in the repo settings, set **Pages → Source → GitHub Actions** and the custom domain.
+
+## License
+
+Morsey is free software, licensed under the **GNU Affero General Public License v3.0 or later** (see [LICENSE](LICENSE)). You may use, study, share and modify it. If you distribute a modified version, or run one for other people to use over a network, you must make your modified source available under the same license. This keeps Morsey free for everyone downstream.
 
 73 · DE MORSEY
