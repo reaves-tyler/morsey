@@ -1,6 +1,6 @@
 # Morsey — CLAUDE.md
 
-Gamified morse code (CW) trainer for amateur radio. Static Nuxt 4 app, no backend — all state lives in browser localStorage. Live at https://reaves-tyler.github.io/morsey/.
+Gamified morse code (CW) trainer for amateur radio. Static Nuxt 4 app, no backend — all state lives in browser localStorage. Live at https://morsey.net/ (GitHub Pages behind a custom domain; the old https://reaves-tyler.github.io/morsey/ URL 301s there).
 
 ## Commands
 
@@ -48,7 +48,7 @@ pnpm 11 gates postinstall scripts: approved builds live in `pnpm-workspace.yaml`
 
 ## Deployment
 
-Push to `main` → `.github/workflows/deploy.yml` → `pnpm exec nuxt build --preset github_pages` with `NUXT_APP_BASE_URL=/<repo>/` → GitHub Pages. Pages source is "GitHub Actions" (already configured).
+Push to `main` → `.github/workflows/deploy.yml` → `pnpm exec nuxt build --preset github_pages` with `NUXT_APP_BASE_URL=/` → GitHub Pages. Pages source is "GitHub Actions"; custom domain `morsey.net` is set in repo Settings → Pages (not a CNAME file — Actions-sourced sites keep it in settings). DNS lives at Cloudflare: four apex `A` records to the Pages IPs plus `www` CNAME → `reaves-tyler.github.io`. The base URL must stay `/` while the custom domain is active; reverting to `/<repo>/` would break asset paths.
 
 Icon gotcha: `icon.provider: 'iconify'` lives under `$production` in `nuxt.config.ts` — prerender fetches icon data from the Iconify API (the static preset has no server icon endpoint) while browsers use the scanned client bundle. Do **not** hoist it to top level: dev must keep the default local server provider or it produces `[Icon] failed to load icon` warnings offline.
 

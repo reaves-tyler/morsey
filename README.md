@@ -1,5 +1,7 @@
 # Morsey — Gamified CW Trainer
 
+**Live at [morsey.net](https://morsey.net/)** — installable as a PWA, works offline.
+
 A modern, dark-mode morse code (CW) trainer for amateur radio operators. Built with **Nuxt 4**, **Nuxt UI**, and **Tailwind CSS** — no backend, no accounts, everything runs in your browser and persists to `localStorage`.
 
 ## Training method

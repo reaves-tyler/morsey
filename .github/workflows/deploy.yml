@@ -36,7 +36,8 @@ jobs:
       - name: Build static site
         run: pnpm exec nuxt build --preset github_pages
         env:
-          NUXT_APP_BASE_URL: /${{ github.event.repository.name }}/
+          # Served from the custom domain root (morsey.net), not /<repo>/
+          NUXT_APP_BASE_URL: /
 
       - uses: actions/upload-pages-artifact@v5
         with:
