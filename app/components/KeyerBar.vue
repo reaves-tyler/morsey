@@ -9,6 +9,7 @@ import { KEY_TYPE_LABELS, type KeyType } from '~/composables/useProgress'
 
 const { progress } = useProgress()
 const keyer = useKeyer()
+const rx = useCwStreamDecoder()
 
 const open = ref(false)
 const serialError = ref('')
@@ -227,6 +228,14 @@ async function connect() {
             : 'border-zinc-800 bg-zinc-900 text-zinc-600'"
         >
           USB {{ keyer.serialConnected.value ? '●' : '○' }}
+        </span>
+
+        <span
+          v-if="rx.listening.value"
+          class="rounded-sm border border-sky-500/50 bg-sky-500/10 px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-sky-300"
+          :title="rx.source.value === 'mic' ? 'Stream decoder listening — keyer sidetone muted' : 'Stream decoder running'"
+        >
+          RX {{ rx.source.value === 'mic' ? '● mute' : '●' }}
         </span>
 
         <span

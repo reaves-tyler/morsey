@@ -19,6 +19,8 @@ let keyNodes: { osc: OscillatorNode; gain: GainNode } | null = null
 /** band-condition nodes active during the current playback */
 let bandNodes: AudioNode[] = []
 let noiseBuffer: AudioBuffer | null = null
+/** set by the stream decoder while a radio is connected: the rig's own sidetone is what the operator hears */
+let sidetoneMuted = false
 
 function whiteNoise(audio: AudioContext): AudioBuffer {
   if (!noiseBuffer) {
@@ -238,9 +240,18 @@ export function useMorseAudio() {
     }
   }
 
+  /**
+   * Mute the keyer sidetone (the stream decoder does this while listening to a
+   * radio, so the operator doesn't hear a delayed echo of the rig's own tone).
+   */
+  function setSidetoneMuted(muted: boolean) {
+    sidetoneMuted = muted
+    if (muted) keyUp()
+  }
+
   /** Start the continuous sidetone (keyer pressed). */
   function keyDown() {
-    if (!import.meta.client) return
+    if (!import.meta.client || sidetoneMuted) return
     const audio = ensureCtx()
     const s = progress.value.settings
     if (!keyNodes) {
@@ -267,5 +278,5 @@ export function useMorseAudio() {
     keyNodes.gain.gain.linearRampToValueAtTime(0, ctx.currentTime + RAMP)
   }
 
-  return { playText, playCue, stop, keyDown, keyUp, playing }
+  return { playText, playCue, stop, keyDown, keyUp, setSidetoneMuted, playing }
 }

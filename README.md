@@ -18,6 +18,7 @@ On top of that, training is **gamified**: XP with levels, answer combos, a daily
 | **Koch Trainer** (`/learn`) | Receiving single characters (Listen & Choose grid or keyboard), 5-character copy groups, whole **words** (top-100 English + ham shorthand, filtered to your unlocked letters), and realistic **callsigns** built from real ITU country prefixes |
 | **Ham Phrases** (`/phrases`) | Q-signals, prosigns (`AR`, `SK`, `BT`…), RST reports (`599`, `5NN`, `559`), and CW shorthand (`CQ`, `UR`, `73`, `QTH`, `DX`…) across six progressive tiers with mastery tracking |
 | **Sending Practice** (`/send`) | Keying with any key type — decoded in real time, validated against target characters/phrases, and graded by a **fist analysis** report (dah:dit weight vs the ideal 3:1, element-length consistency) |
+| **Stream Decoding** (`/decode`) | A live over-the-air CW terminal: feed it the rig's audio (line-in / USB sound card) and it prints what it hears. Spectrum display with click-to-tune passband, adaptive threshold with floor/threshold/peak meter, speed tracking, prosigns as chips. A built-in **sample library** (clean → hand-sent → noisy → QSB → QRM → weak) lets you exercise the decoder before any hardware is connected; the same clips ship as WAVs under `public/samples/cw/` |
 | **QSO Simulator** (`/qso`) | A complete scripted first contact: copy a CQ call, answer with your callsign, copy the RST/name/QTH exchange (sent twice, as on the air), key your half, and copy the 73/`SK` sign-off. Receive-only mode available |
 | **Stats** (`/stats`) | Per-character accuracy heatmap in Koch order and a 30-day activity chart (answers or XP per day) |
 | **Reference** (`/reference` + nav overlay) | Searchable legend of every character, prosign, and abbreviation — also opens as a slideover from any page (search by text, meaning, or pattern like `.-`), with one-click audio |
@@ -31,6 +32,8 @@ A radio-style control bar sits at the bottom of every page — collapsed it show
 - **USB bridge**: connect, live TIP/RING contact-test LEDs, bridge-ready status, and an event counter for wiring-day debugging.
 
 ## Hardware support
+
+- **Radio audio in** (`/decode`): any transceiver's headphone / line-out into the computer's line-in or a USB sound card. The browser's voice processing (AGC, noise suppression, echo cancellation) is switched off for the capture, so the keyed tone arrives intact. Set the decoder's centre pitch to the rig's CW pitch (700 Hz on a QMX).
 
 - **USB keyers that emulate a keyboard/mouse** work out of the box — key presses are captured directly.
 - **Serial-wired paddles** connect through the **Web Serial API** (Chrome/Edge): Morsey raises DTR/RTS and polls **CTS (dit)** and **DSR/DCD (dah)** at 5 ms.

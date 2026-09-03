@@ -61,7 +61,10 @@ export default defineNuxtConfig({
       ]
     },
     workbox: {
+      // (the CW sample WAVs under /samples are deliberately not precached —
+      // they are fetched on demand from the decode page)
       globPatterns: ['**/*.{js,css,html,svg,png,ico,json,woff2}'],
+      globIgnores: ['**/samples/**'],
       // No SPA fallback: every route is prerendered and precached, in-app
       // navigation is client-side, and a fallback shell would hijack normal
       // online navigations (serving the '/' document for /learn). Offline,
