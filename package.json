@@ -11,11 +11,13 @@
     "generate": "nuxt generate",
     "preview": "nuxt preview",
     "test": "vitest run",
-    "postinstall": "nuxt prepare"
+    "postinstall": "nuxt prepare",
+    "samples": "node scripts/gen-cw-samples.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@vite-pwa/nuxt": "^1.1.1",
+    "playwright-core": "^1.62.1",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0",
     "vue-tsc": "^3.0.0"

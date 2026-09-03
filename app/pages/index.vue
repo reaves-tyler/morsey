@@ -48,6 +48,14 @@ const modules = computed(() => [
     statLabel: 'your call'
   },
   {
+    to: '/decode',
+    icon: 'i-lucide-audio-waveform',
+    title: 'Stream Decoding',
+    subtitle: 'Live over-the-air CW terminal — line-in from your rig, or test samples',
+    stat: `${progress.value.settings.freq} Hz`,
+    statLabel: 'pitch'
+  },
+  {
     to: '/stats',
     icon: 'i-lucide-activity',
     title: 'Stats',

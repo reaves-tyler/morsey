@@ -67,13 +67,13 @@ describe('word lists', () => {
 
 describe('QSO script builder', () => {
   it('follows the canonical listen/send/listen/send/listen structure', () => {
-    const qso = buildQso('KD9ABC', 'TYLER')
+    const qso = buildQso('KD9ABC', 'OP')
     expect(qso.steps.map(s => s.type)).toEqual(['listen', 'send', 'listen', 'send', 'listen'])
   })
 
   it('keeps the station consistent and repeats exchange fields twice, as taught', () => {
     for (let i = 0; i < 50; i++) {
-      const qso = buildQso('kd9abc', 'tyler')
+      const qso = buildQso('kd9abc', 'op')
       // CQ carries their call three times; copy field answer matches
       const cq = qso.steps[0]!
       expect(cq.text).toContain(`CQ CQ CQ DE ${qso.their} ${qso.their} ${qso.their} K`)
@@ -92,14 +92,14 @@ describe('QSO script builder', () => {
       expect(qso.steps[4]!.text).toContain('73')
       expect(qso.steps[4]!.text).toContain('<SK>')
       // our sent exchange includes our name twice and the outgoing RST
-      expect(qso.steps[3]!.text).toContain('TYLER TYLER')
+      expect(qso.steps[3]!.text).toContain('OP OP')
       expect(qso.steps[3]!.text).toContain(`${qso.rstOut} ${qso.rstOut}`)
     }
   })
 
   it('QTH belongs to the generated station entity', () => {
     for (let i = 0; i < 50; i++) {
-      const qso = buildQso('KD9ABC', 'TYLER')
+      const qso = buildQso('KD9ABC', 'OP')
       const entity = CALLSIGN_ENTITIES.find(e => e.qths.includes(qso.qth))
       expect(entity, qso.qth).toBeTruthy()
       expect(entity!.prefixes.some(p => qso.their.startsWith(p)), `${qso.their} vs ${entity!.entity}`).toBe(true)
@@ -107,7 +107,7 @@ describe('QSO script builder', () => {
   })
 
   it('every step text is sendable morse (known characters and prosigns only)', () => {
-    const qso = buildQso('KD9ABC', 'TYLER')
+    const qso = buildQso('KD9ABC', 'OP')
     for (const step of qso.steps) {
       const tokens = step.text.toUpperCase().split(/\s+/).flatMap(w => w.match(/<[A-Z]+>|./g) ?? [])
       for (const tok of tokens) {

@@ -7,6 +7,7 @@ const pageLinks = [
   { to: '/phrases', label: 'Phrases', icon: 'i-lucide-message-square-code' },
   { to: '/send', label: 'Send', icon: 'i-lucide-radio-tower' },
   { to: '/qso', label: 'QSO', icon: 'i-lucide-antenna' },
+  { to: '/decode', label: 'Decode', icon: 'i-lucide-audio-waveform' },
   { to: '/stats', label: 'Stats', icon: 'i-lucide-activity' }
 ]
 

@@ -1,0 +1,74 @@
+[
+  {
+    "id": "clean-20",
+    "file": "clean-20.wav",
+    "name": "Armchair copy",
+    "description": "20 WPM, machine timing, no noise — decoder should be perfect.",
+    "difficulty": 1,
+    "text": "CQ CQ CQ DE W1AW W1AW K",
+    "seconds": 15.3
+  },
+  {
+    "id": "farnsworth-20-10",
+    "file": "farnsworth-20-10.wav",
+    "name": "Farnsworth 20/10",
+    "description": "Morsey-style Koch spacing: characters at 20 WPM, gaps stretched to 10 WPM.",
+    "difficulty": 1,
+    "text": "KMUR KUMR MRKU RUKM",
+    "seconds": 20.4
+  },
+  {
+    "id": "hand-sent-15",
+    "file": "hand-sent-15.wav",
+    "name": "Hand-sent 15 WPM",
+    "description": "Straight-key fist: heavy dahs (3.6:1), 15 % timing jitter, mild noise.",
+    "difficulty": 2,
+    "text": "UR RST 579 579 = NAME OP OP = QTH TOWN TOWN K",
+    "seconds": 37.6
+  },
+  {
+    "id": "noisy-18",
+    "file": "noisy-18.wav",
+    "name": "Noisy band",
+    "description": "18 WPM under QRN at 8 dB SNR (2.5 kHz) — a typical evening on 40 m.",
+    "difficulty": 3,
+    "text": "TNX FER CALL = UR RST 559 559 = RIG IS QMX 5W ES ANT IS EFHW K",
+    "seconds": 36.3
+  },
+  {
+    "id": "qsb-20",
+    "file": "qsb-20.wav",
+    "name": "Deep QSB",
+    "description": "20 WPM with 80 % fading at 0.25 Hz plus noise — the threshold has to ride the fade.",
+    "difficulty": 3,
+    "text": "QSB QSB UR SIG FADING = PSE RPT UR QTH QTH K",
+    "seconds": 23.8
+  },
+  {
+    "id": "qrm-22",
+    "file": "qrm-22.wav",
+    "name": "QRM 250 Hz up",
+    "description": "22 WPM with an equal-strength station 250 Hz above — narrow the bandwidth to separate them.",
+    "difficulty": 4,
+    "text": "CQ TEST CQ TEST DE N1XYZ N1XYZ TEST",
+    "seconds": 18
+  },
+  {
+    "id": "fast-30",
+    "file": "fast-30.wav",
+    "name": "Fast 30 WPM",
+    "description": "30 WPM contest exchange with mild noise — timing resolution test.",
+    "difficulty": 4,
+    "text": "W1AW 5NN 05 TU",
+    "seconds": 6.4
+  },
+  {
+    "id": "weak-16",
+    "file": "weak-16.wav",
+    "name": "Weak signal",
+    "description": "16 WPM at −3 dB SNR (2.5 kHz) — below the noise in the receiver. Garbles at 100 Hz bandwidth; narrow to 50 Hz and it copies clean.",
+    "difficulty": 5,
+    "text": "QRP QRP DE N0CALL N0CALL PSE K",
+    "seconds": 23.7
+  }
+]
