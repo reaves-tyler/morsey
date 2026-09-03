@@ -1,4 +1,11 @@
 <script setup lang="ts">
+useSeoMeta({
+  title: 'Koch Method Morse Code Trainer',
+  description: 'Learn Morse code characters by ear with the Koch method: full-speed characters at 20 WPM, Farnsworth spacing, all 41 characters in LCWO order, and a new one unlocked at 90% accuracy. Copy code groups, real words and callsigns. Free, in the browser.',
+  ogTitle: 'Koch Method Morse Code Trainer · Morsey',
+  ogDescription: 'Full-speed characters, Farnsworth spacing, 41 characters in Koch order. Free CW training in the browser.'
+})
+
 import { TOTAL_LESSONS, patternFor } from '~/utils/morse'
 import { wordsFor } from '~/utils/words'
 import { generateCallsign, callsignsAvailable } from '~/utils/callsigns'

@@ -1,4 +1,7 @@
 <script setup lang="ts">
+// Personal state only — nothing here for a search engine
+useSeoMeta({ title: 'Settings', robots: 'noindex, follow' })
+
 import { parseProgressJson, type ProgressState } from '~/composables/useProgress'
 
 const { progress, resetProgress, resetSettings } = useProgress()

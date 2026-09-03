@@ -1,9 +1,39 @@
 export default defineNuxtConfig({
   compatibilityDate: '2025-07-15',
-  modules: ['@nuxt/ui', '@vite-pwa/nuxt'],
+  modules: ['@nuxt/ui', '@vite-pwa/nuxt', '@nuxtjs/sitemap', '@nuxtjs/robots'],
   css: ['~/assets/css/main.css'],
   ssr: true,
   devtools: { enabled: false },
+  // SEO: canonical origin for sitemap/robots/OG URLs. GitHub Pages serves
+  // prerendered routes as /learn/ (301 from /learn), so canonical URLs and the
+  // sitemap use trailing slashes to match what the server actually returns.
+  site: {
+    url: 'https://morsey.net',
+    name: 'Morsey',
+    description: 'Free, open-source morse code (CW) trainer for ham radio: Koch method, Farnsworth timing, sending practice with a real key, QSO simulator, and a live CW decoder.',
+    defaultLocale: 'en',
+    trailingSlash: true,
+    indexable: true
+  },
+  sitemap: {
+    // Personal, state-only pages have nothing for a search engine to index
+    exclude: ['/settings', '/stats'],
+    xsl: false
+  },
+  robots: {
+    // Everything is public. AI search crawlers are welcome — listing them
+    // explicitly documents intent (some default to "unless told otherwise").
+    groups: [
+      { userAgent: ['*'], allow: ['/'], disallow: ['/settings', '/stats'] },
+      {
+        userAgent: [
+          'GPTBot', 'OAI-SearchBot', 'ChatGPT-User', 'ClaudeBot', 'Claude-SearchBot', 'anthropic-ai',
+          'PerplexityBot', 'Perplexity-User', 'Google-Extended', 'Applebot-Extended', 'Bingbot', 'DuckAssistBot', 'CCBot'
+        ],
+        allow: ['/']
+      }
+    ]
+  },
   colorMode: {
     preference: 'dark',
     fallback: 'dark'
@@ -20,21 +50,32 @@ export default defineNuxtConfig({
   $production: {
     icon: {
       provider: 'iconify'
+    },
+    app: {
+      head: {
+        script: [
+          // Cloudflare Web Analytics (beacon, cookie-free). Production only so
+          // dev and test runs don't count as visits. Offline/PWA: the script
+          // simply fails to load; nothing depends on it.
+          {
+            type: 'module',
+            src: 'https://static.cloudflareinsights.com/beacon.min.js',
+            'data-cf-beacon': '{"token": "3846f3821b3b4d798e4f15c2d4dc6fc3"}'
+          }
+        ]
+      }
     }
   },
   app: {
     // Overridden to /<repo>/ by the GitHub Pages workflow
     baseURL: process.env.NUXT_APP_BASE_URL || '/',
     head: {
-      title: 'Morsey — CW Trainer',
+      // Title/description/OG/canonical/JSON-LD are set per route in app.vue
+      // and each page via useSeoMeta; only the invariant bits live here.
       htmlAttrs: { lang: 'en' },
       meta: [
         { name: 'viewport', content: 'width=device-width, initial-scale=1' },
-        {
-          name: 'description',
-          content:
-            'Gamified morse code trainer for ham radio operators. Koch method, Farnsworth timing, Q-signals, and USB paddle support — all in the browser.'
-        }
+        { name: 'theme-color', content: '#09090b' }
       ],
       link: [{ rel: 'icon', type: 'image/svg+xml', href: (process.env.NUXT_APP_BASE_URL || '/') + 'favicon.svg' }]
     }

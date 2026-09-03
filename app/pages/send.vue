@@ -1,4 +1,11 @@
 <script setup lang="ts">
+useSeoMeta({
+  title: 'Morse Code Sending Practice with a Real Key or Paddle',
+  description: 'Practice sending CW with your keyboard, an on-screen key, or a real straight key, bug or iambic paddle connected over USB. Iambic A and B modes with adjustable keyer feel, live decoding of every character, and a fist report showing your dah:dit ratio and timing consistency.',
+  ogTitle: 'Morse Code Sending Practice · Morsey',
+  ogDescription: 'Key with a keyboard, touch, or a real paddle over USB. Live decode plus a fist report on your timing.'
+})
+
 import { PHRASE_TIERS } from '~/utils/abbreviations'
 import { patternFor, wordPattern } from '~/utils/morse'
 import { KEY_TYPE_LABELS } from '~/composables/useProgress'

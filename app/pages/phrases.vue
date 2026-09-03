@@ -1,4 +1,11 @@
 <script setup lang="ts">
+useSeoMeta({
+  title: 'Q-Signals, Prosigns & Ham Abbreviations Quiz',
+  description: 'Drill the CW vocabulary hams use on the air: Q-signals like QTH, QSL and QRZ, prosigns AR, SK, BT and KN, RST signal reports, and abbreviations like TNX, HW CPY and 73, in six progressive tiers with audio.',
+  ogTitle: 'Q-Signals, Prosigns & Ham Abbreviations · Morsey',
+  ogDescription: 'Learn the CW shorthand real QSOs are made of, by ear, in six progressive tiers.'
+})
+
 import { PHRASE_TIERS, type Phrase } from '~/utils/abbreviations'
 import { shuffle, wordPattern } from '~/utils/morse'
 import { PHRASE_MASTERY, TIER_UNLOCK } from '~/composables/useProgress'

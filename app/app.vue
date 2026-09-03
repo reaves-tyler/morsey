@@ -1,6 +1,109 @@
 <script setup lang="ts">
 const { progress, level } = useProgress()
 
+// ---- Site-wide SEO -------------------------------------------------------
+// Each page sets its own title/description via useSeoMeta; this supplies the
+// title template, canonical URL, Open Graph / Twitter defaults and JSON-LD.
+const SITE_URL = 'https://morsey.net'
+const SITE_NAME = 'Morsey'
+const DEFAULT_TITLE = 'Morsey — Free Morse Code (CW) Trainer for Ham Radio'
+const DEFAULT_DESCRIPTION =
+  'Learn Morse code by ear with a free, open-source CW trainer: Koch method, Farnsworth timing, Q-signals, sending practice with a real key or paddle, a QSO simulator and a live on-air decoder. Runs in the browser, works offline.'
+
+const route = useRoute()
+// GitHub Pages serves prerendered routes at /learn/ and 301s /learn there, so
+// the canonical (and og:url) must carry the trailing slash to match.
+const canonical = computed(() => {
+  const path = route.path === '/' ? '/' : route.path.replace(/\/?$/, '/')
+  return SITE_URL + path
+})
+
+useHead({
+  titleTemplate: (title?: string) => (title ? `${title} · ${SITE_NAME}` : DEFAULT_TITLE),
+  link: [{ rel: 'canonical', href: canonical }],
+  script: [
+    {
+      type: 'application/ld+json',
+      // Structured data: the site, the app, and who makes it. Prices are
+      // explicit zeros so "free" is machine-readable, not just marketing copy.
+      innerHTML: JSON.stringify({
+        '@context': 'https://schema.org',
+        '@graph': [
+          {
+            '@type': 'WebSite',
+            '@id': `${SITE_URL}/#website`,
+            url: `${SITE_URL}/`,
+            name: SITE_NAME,
+            description: DEFAULT_DESCRIPTION,
+            inLanguage: 'en'
+          },
+          {
+            '@type': ['WebApplication', 'SoftwareApplication'],
+            '@id': `${SITE_URL}/#app`,
+            name: SITE_NAME,
+            alternateName: 'Morsey CW Trainer',
+            url: `${SITE_URL}/`,
+            description: DEFAULT_DESCRIPTION,
+            applicationCategory: 'EducationalApplication',
+            applicationSubCategory: 'Morse code trainer',
+            operatingSystem: 'Any — runs in a web browser (Chrome, Edge, Firefox, Safari); installable as a PWA',
+            browserRequirements: 'Requires JavaScript and Web Audio. Web Serial (Chrome/Edge) for USB keys.',
+            isAccessibleForFree: true,
+            offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD', availability: 'https://schema.org/InStock' },
+            license: 'https://github.com/reaves-tyler/morsey',
+            codeRepository: 'https://github.com/reaves-tyler/morsey',
+            keywords: [
+              'morse code trainer', 'CW trainer', 'learn morse code', 'Koch method', 'Farnsworth timing',
+              'ham radio', 'amateur radio', 'CW decoder', 'morse code practice', 'iambic keyer', 'QSO simulator'
+            ].join(', '),
+            featureList: [
+              'Koch method character training at full character speed',
+              'Farnsworth spacing per the ARRL formula',
+              'Q-signals, prosigns and ham abbreviations in progressive tiers',
+              'Sending practice with keyboard, on-screen key, or a real straight key / paddle over USB',
+              'Iambic A, iambic B, bug and straight-key modes with adjustable keyer feel',
+              'Scripted first-QSO simulator',
+              'Live CW decoder for your transceiver audio with spectrum display',
+              'Simulated band conditions: QRN, QSB, QRM',
+              'Progress, streaks and per-character accuracy stats',
+              'Installable PWA that works offline; no account, no tracking'
+            ],
+            author: { '@id': `${SITE_URL}/#author` },
+            publisher: { '@id': `${SITE_URL}/#author` }
+          },
+          {
+            '@type': 'Person',
+            '@id': `${SITE_URL}/#author`,
+            name: 'Tyler Reaves',
+            url: 'https://github.com/reaves-tyler'
+          }
+        ]
+      })
+    }
+  ]
+})
+
+useSeoMeta({
+  description: DEFAULT_DESCRIPTION,
+  ogType: 'website',
+  ogSiteName: SITE_NAME,
+  ogTitle: DEFAULT_TITLE,
+  ogDescription: DEFAULT_DESCRIPTION,
+  ogUrl: canonical,
+  ogImage: `${SITE_URL}/og.png`,
+  ogImageWidth: 1200,
+  ogImageHeight: 630,
+  ogImageAlt: 'Morsey — free Morse code trainer for ham radio',
+  ogLocale: 'en_US',
+  twitterCard: 'summary_large_image',
+  twitterTitle: DEFAULT_TITLE,
+  twitterDescription: DEFAULT_DESCRIPTION,
+  twitterImage: `${SITE_URL}/og.png`,
+  applicationName: SITE_NAME,
+  appleMobileWebAppTitle: SITE_NAME,
+  robots: 'index, follow, max-image-preview:large, max-snippet:-1'
+})
+
 const pageLinks = [
   { to: '/', label: 'Dashboard', icon: 'i-lucide-layout-dashboard' },
   { to: '/learn', label: 'Learn', icon: 'i-lucide-graduation-cap' },
@@ -94,7 +197,10 @@ const mobileLinks = [
       </main>
 
       <footer class="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 border-t border-zinc-800/80 py-4 pb-14 text-center font-mono text-xs text-zinc-600">
-        <span>73 DE MORSEY <span class="text-zinc-700">·-·-·</span> CW trainer — Koch method · Farnsworth timing</span>
+        <span>73 DE MORSEY <span class="text-zinc-700">·-·-·</span> Free &amp; open-source CW trainer — Koch method · Farnsworth timing</span>
+        <NuxtLink to="/about" class="text-zinc-500 transition hover:text-emerald-400">
+          About &amp; FAQ
+        </NuxtLink>
         <a
           href="https://github.com/reaves-tyler/morsey"
           target="_blank"

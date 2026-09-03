@@ -10,6 +10,7 @@ pnpm dev              # dev server on :3000
 pnpm run generate     # static production build → .output/public
 pnpm test             # vitest — keyer engine, Farnsworth math, generators, backup schema, CW stream decoder
 pnpm run samples      # re-render the CW sample WAVs (public/samples/cw) from utils/cwSynth presets
+pnpm run og           # re-render the social preview public/og.png from scripts/og/og-image.html (playwright-core Chromium)
 pnpm exec nuxt typecheck
 ```
 
@@ -41,10 +42,15 @@ pnpm 11 gates postinstall scripts: approved builds live in `pnpm-workspace.yaml`
 | `app/utils/cwSynth.ts` | Deterministic CW band-audio synthesizer (`renderCw`): Farnsworth timing via `textToSchedule`, hand-sent weight/jitter, QRN at an SNR quoted in a 2.5 kHz bandwidth, QSB, QRM, drift, keying envelope centred on the nominal edges. `SAMPLE_PRESETS` (8 clips, easiest→hardest) back both the in-app "Test sample" source and `scripts/gen-cw-samples.ts` (→ `public/samples/cw/*.wav`, excluded from the PWA precache). `encodeWav16` writes the files. |
 | `app/composables/useCwStreamDecoder.ts` | Browser adapter for the decoder, module-level singleton (keeps running across navigation until Stop). Graph: source → BiquadFilter bandpass (Q = f/2·bw clamped 5–50, toggleable) → inline-Blob AudioWorklet that forwards 1024-sample PCM blocks to the main-thread decoder (ScriptProcessor fallback); an AnalyserNode on the *unfiltered* source feeds the spectrum. Sources: `mic` (getUserMedia with echoCancellation/noiseSuppression/autoGainControl **off** — they destroy CW; never monitored to speakers; mutes the keyer sidetone via `useMorseAudio().setSidetoneMuted`), `sample` (renders a preset into an AudioBuffer at the context rate), `file` (decodeAudioData). A second tap on the *raw* source feeds the **recorder** (`startRecording`/`stopRecording` → 16-bit WAV Blob at the context rate, capped at ~10 min) so real on-air misses can be replayed through the decoder tests. Settings persist to localStorage `morsey-decode-v1`. |
 | `app/pages/decode.vue` | Stream decoding UI: spectrum (200–1600 Hz, passband overlay, click/drag or "Tune to peak" to set the pitch), level meter with floor/threshold/peak marks, WPM/SNR/gap readouts, element ribbon, live terminal (prosign chips, unknown = dim dot), source picker with the sample library, pitch/bandwidth sliders, auto/manual threshold + squelch, timing & noise-blanker knobs, Rec button (downloads the WAV when stopped or when listening stops). |
+| `app/pages/about.vue` | About & FAQ: crawlable prose on the method (Koch, Farnsworth, real-key sending, on-air readiness) plus an FAQ also emitted as `FAQPage` JSON-LD. Linked from the footer and the landing blurb. Tyler does not want a competitor comparison page — "it's not a competition" — so keep other trainers out of the copy. |
 | `app/pages/stats.vue` | Stat tiles, per-char accuracy heatmap (sequential emerald ramp), 30-day activity SVG bars from `progress.history` (recorded in `recordAnswer`/`addXp`), table fallback. |
 | `app/utils/callsigns.ts` | Weighted ITU-prefix callsign generator (`generateCallsign(allowedChars?)` respects Koch progression). |
 | `app/utils/words.ts` | Top-100 English + ham words; `wordsFor(unlockedLetters)`. |
 | `app/components/ReferenceLegend.vue` | Searchable legend (text / meaning / pattern-prefix search), used by the nav slideover (`compact`) and `/reference`. |
+
+## SEO
+
+Site-wide head lives in `app.vue`: title template (`<page> · Morsey`), canonical (trailing slash — matches what Pages serves), OG/Twitter defaults pointing at `public/og.png`, and JSON-LD (`WebSite` + `WebApplication`/`SoftwareApplication` with `isAccessibleForFree` and a zero-price offer + `Person`). Every page sets `useSeoMeta({ title, description, ogTitle, ogDescription })` at the top of its script; `stats` and `settings` are `noindex` and excluded from the sitemap. The landing page (`index.vue`) keeps a descriptive H1 + one-paragraph pitch above the dashboard; the longer method prose and the FAQ (also emitted as `FAQPage` JSON-LD) live on `/about` — keep answers honest (no inflated learning-time claims). `@nuxtjs/sitemap` + `@nuxtjs/robots` (config under `site`/`sitemap`/`robots` in `nuxt.config.ts`) prerender `/sitemap.xml` and `/robots.txt`; AI search crawlers are explicitly allowed. `public/llms.txt` is the AI-search summary — update it when features change. No hidden text or keyword stuffing, ever: it risks the whole domain.
 
 ## Deployment
 

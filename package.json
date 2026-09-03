@@ -12,9 +12,12 @@
     "preview": "nuxt preview",
     "test": "vitest run",
     "postinstall": "nuxt prepare",
-    "samples": "node scripts/gen-cw-samples.ts"
+    "samples": "node scripts/gen-cw-samples.ts",
+    "og": "node scripts/gen-og-image.mjs"
   },
   "devDependencies": {
+    "@nuxtjs/robots": "^6.2.0",
+    "@nuxtjs/sitemap": "^8.5.0",
     "@types/node": "^22.0.0",
     "@vite-pwa/nuxt": "^1.1.1",
     "playwright-core": "^1.62.1",

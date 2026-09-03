@@ -1,4 +1,11 @@
 <script setup lang="ts">
+useSeoMeta({
+  title: 'Live CW Decoder for Your Transceiver Audio',
+  description: 'Decode Morse code from your radio in real time, in the browser. Feed line-in or a USB sound card, tune the passband on a live spectrum display, and read a text terminal with automatic speed tracking, adaptive noise threshold and prosign detection. Test it first with built-in clean, noisy, QSB and QRM samples.',
+  ogTitle: 'Live CW Decoder · Morsey',
+  ogDescription: 'Browser-based Morse decoder for rig audio: spectrum tuning, adaptive threshold, speed tracking.'
+})
+
 import type { SamplePreset } from '~/utils/cwSynth'
 import { DEFAULT_DEVICE } from '~/composables/useCwStreamDecoder'
 

@@ -1,4 +1,7 @@
 <script setup lang="ts">
+// Personal state only — nothing here for a search engine
+useSeoMeta({ title: 'Your Stats', robots: 'noindex, follow' })
+
 import { KOCH_ORDER } from '~/utils/morse'
 
 const { progress, level, lifetimeAccuracy } = useProgress()

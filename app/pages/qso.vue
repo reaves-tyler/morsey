@@ -1,4 +1,11 @@
 <script setup lang="ts">
+useSeoMeta({
+  title: 'CW QSO Simulator — Practice Your First Morse Code Contact',
+  description: 'Rehearse a complete Morse code QSO end to end: call CQ, exchange RST, QTH and name, and sign off with 73, following the standard beginner contact structure. Listen and copy the other station, then key your own side with live decoding, or run it receive-only.',
+  ogTitle: 'CW QSO Simulator · Morsey',
+  ogDescription: 'A full first contact from CQ to 73, both directions, before you ever key up on the air.'
+})
+
 import { buildQso, type QsoScript } from '~/utils/qso'
 import { wordPattern } from '~/utils/morse'
 

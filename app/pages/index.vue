@@ -70,10 +70,13 @@ const modules = computed(() => [
   <div class="space-y-8">
     <section>
       <h1 class="text-2xl font-semibold tracking-tight">
-        Operator dashboard
+        Learn Morse code by ear
       </h1>
-      <p class="mt-1 text-sm text-zinc-400">
-        Train your ears daily. Characters at full speed, spacing that grows with you.
+      <p class="mt-1 max-w-3xl text-sm text-zinc-400">
+        Morsey is a free, open-source CW trainer for amateur radio. Characters at full speed, spacing that
+        grows with you, a real key when you're ready, and a live decoder for your rig — all in the browser,
+        no account, works offline.
+        <NuxtLink to="/about" class="text-emerald-400 hover:underline">How it works</NuxtLink>
       </p>
     </section>
 
@@ -167,5 +170,6 @@ const modules = computed(() => [
         </span>
       </div>
     </section>
+
   </div>
 </template>
