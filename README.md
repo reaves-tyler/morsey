@@ -37,6 +37,7 @@ A radio-style control bar sits at the bottom of every page — collapsed it show
 
 - **USB keyers that emulate a keyboard/mouse** work out of the box — key presses are captured directly.
 - **Serial-wired paddles** connect through the **Web Serial API** (Chrome/Edge): Morsey raises DTR/RTS and polls **CTS (dit)** and **DSR/DCD (dah)** at 5 ms.
+- **Pico key bridge** (`hardware/pico-bridge/`): any key → 3.5 mm TRS → Raspberry Pi Pico → USB serial. **Linux users:** the port is `root:dialout` by default, so see the one-time [Linux setup](hardware/pico-bridge/README.md#linux-setup) (udev rule or `dialout` group + reboot) before hitting CONNECT.
 - No hardware? Use `Space` as a straight key, `[` / `]` (or Left/Right `Ctrl`) as paddles, or the on-screen touch key.
 
 The audio engine is the native **Web Audio API** — a pure sine sidetone (700 Hz default, adjustable) with 5 ms gain ramps so it never clicks.

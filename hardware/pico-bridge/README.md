@@ -35,6 +35,72 @@ Radio operation: unplug the aux cable from the bridge and use a
 2. Copy `main.py` to the root of the board (Thonny, `mpremote cp main.py :`,
    or drag-and-drop in some IDEs). It runs automatically on power-up.
 
+## Linux setup
+
+The Pico enumerates as a USB CDC serial device (`2e8a:0005`, "MicroPython
+Board in FS mode"). The in-kernel `cdc_acm` driver binds to it and creates
+`/dev/ttyACM0` — nothing to install. Two things commonly stop the browser from
+opening that port, and one browser caveat:
+
+### 1. Permission denied on `/dev/ttyACM0`
+
+Every mainstream distro creates the port as `root:dialout`, mode `660`, and a
+fresh user account is **not** in `dialout`. Chrome's serial picker will list
+the port but fail to open it. Pick one fix:
+
+**Option A — udev rule (recommended: no group change, no re-login).**
+
+```bash
+sudo cp hardware/pico-bridge/99-morsey-pico.rules /etc/udev/rules.d/
+sudo udevadm control --reload
+# unplug and replug the Pico
+```
+
+The rule tags the device `uaccess`, so systemd-logind grants the logged-in
+desktop user an ACL on the port automatically. It also sets
+`ID_MM_DEVICE_IGNORE` (see §2).
+
+**Option B — join the `dialout` group.**
+
+```bash
+sudo usermod -aG dialout "$USER"
+```
+
+Then **reboot**. Logging out and back in is often *not* enough on a modern
+desktop: on GNOME (and other systemd-managed sessions) the per-user
+`systemd --user` manager survives logout and re-spawns the shell, terminal
+and browser with its boot-time group list, so `id -nG` still lacks
+`dialout` after a fresh login. A reboot (or `sudo loginctl terminate-user
+"$USER"`, which kills every process you own) restarts that manager.
+
+### 2. ModemManager grabs new serial ports
+
+ModemManager probes any new tty for a modem for 20–30 s after plug-in;
+during that window the port opens as "busy". The udev rule above opts the
+Pico out. If you chose Option B instead, either add the rule anyway or stop
+the service (`sudo systemctl disable --now ModemManager`) if you don't use a
+cellular modem.
+
+### 3. Browser
+
+Web Serial exists only in Chromium-based browsers (Chrome, Edge, Chromium,
+Brave). Firefox has no Web Serial API. A **Flatpak** or **Snap** Chrome
+cannot see serial devices unless the sandbox is opened, e.g.
+`flatpak override --user --device=all com.google.Chrome`; the distro or
+Google `.deb`/`.rpm` package works out of the box.
+
+### Verifying
+
+```bash
+lsusb | grep 2e8a          # Pico is enumerated
+ls -l /dev/ttyACM*         # port node exists (root dialout, crw-rw----)
+id -nG | grep -w dialout   # Option B only: group applied to this login
+head -c1 /dev/ttyACM0      # hangs waiting for data = OK; "Permission denied" = not yet
+```
+
+If `head` hangs, press Ctrl+C — the port is yours. Open Morsey in Chrome,
+pull up the keyer bar and hit **CONNECT**.
+
 ## Protocol
 
 Plain text lines over USB serial (baud is ignored by USB CDC):

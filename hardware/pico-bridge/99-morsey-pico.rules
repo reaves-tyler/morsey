@@ -1,0 +1,14 @@
+# Morsey Pico key bridge — udev rule for Linux.
+#
+# Install:  sudo cp 99-morsey-pico.rules /etc/udev/rules.d/
+#           sudo udevadm control --reload
+#           then unplug and replug the Pico.
+#
+# TAG+="uaccess"              grants the logged-in desktop user read/write on the
+#                             serial port via an ACL — no dialout group, no re-login.
+# ENV{ID_MM_DEVICE_IGNORE}    stops ModemManager probing the port for ~30 s after
+#                             plug-in (during which the browser sees it as busy).
+#
+# 2e8a is the Raspberry Pi vendor ID used by MicroPython (0005) and CircuitPython
+# boards; matching on vendor only keeps the rule valid across firmware builds.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
