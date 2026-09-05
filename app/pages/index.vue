@@ -4,7 +4,7 @@ import { PHRASE_TIERS } from '~/utils/abbreviations'
 import { KEY_TYPE_LABELS } from '~/composables/useProgress'
 
 const {
-  progress, level, levelProgress, xpToNextLevel, unlockedChars,
+  progress, freePlay, level, levelProgress, xpToNextLevel, unlockedChars,
   kochWindowAccuracy, kochComplete, masteredPhrases, unlockedTierCount,
   lifetimeAccuracy, weakestChars
 } = useProgress()
@@ -17,7 +17,9 @@ const modules = computed(() => [
     to: '/learn',
     icon: 'i-lucide-graduation-cap',
     title: 'Koch Trainer',
-    subtitle: kochComplete.value
+    subtitle: freePlay.value
+      ? 'Free play · all 41 characters open'
+      : kochComplete.value
       ? 'All 41 characters unlocked — keep drilling!'
       : `Lesson ${progress.value.koch.lesson} of ${TOTAL_LESSONS} · ${unlockedChars.value.length} characters unlocked`,
     stat: `${Math.round(kochWindowAccuracy.value * 100)}%`,
@@ -27,7 +29,9 @@ const modules = computed(() => [
     to: '/phrases',
     icon: 'i-lucide-message-square-code',
     title: 'Ham Phrases',
-    subtitle: `Tier ${unlockedTierCount.value} of ${PHRASE_TIERS.length} · Q-signals, prosigns & abbreviations`,
+    subtitle: freePlay.value
+      ? 'Free play · all tiers open'
+      : `Tier ${unlockedTierCount.value} of ${PHRASE_TIERS.length} · Q-signals, prosigns & abbreviations`,
     stat: `${masteredPhrases.value.length}/${totalPhrases}`,
     statLabel: 'mastered'
   },

@@ -159,6 +159,10 @@ let persistenceAttached = false
 
 export function useProgress() {
   const progress = useState<ProgressState>('morsey-progress', defaultState)
+  // "Creative mode": every character and phrase tier is open while this is on.
+  // Session-only on purpose (not persisted) — reload and you're back on the
+  // Koch track. Real progression is never modified, only bypassed.
+  const freePlay = useState<boolean>('morsey-free-play', () => false)
 
   if (import.meta.client && !persistenceAttached) {
     persistenceAttached = true
@@ -193,7 +197,9 @@ export function useProgress() {
   const xpToNextLevel = computed(() => xpForLevel(level.value + 1) - progress.value.xp)
 
   const unlockedChars = computed(() =>
-    KOCH_ORDER.slice(0, progress.value.koch.lesson + 1) as string[]
+    (freePlay.value
+      ? KOCH_ORDER
+      : KOCH_ORDER.slice(0, progress.value.koch.lesson + 1)) as string[]
   )
 
   const kochWindowAccuracy = computed(() => {
@@ -203,6 +209,7 @@ export function useProgress() {
   })
 
   const canAdvance = computed(() =>
+    !freePlay.value &&
     progress.value.koch.lesson <= TOTAL_LESSONS &&
     progress.value.koch.window.length >= UNLOCK_WINDOW &&
     kochWindowAccuracy.value >= UNLOCK_ACCURACY
@@ -219,7 +226,9 @@ export function useProgress() {
   // Once open, a tier stays open (high-water mark) — review mistakes on an
   // earlier tier must never re-lock the tier you're currently working on
   const unlockedTierCount = computed(() =>
-    Math.max(rawTierCount(progress.value.phraseStreaks), progress.value.tierHighWater)
+    freePlay.value
+      ? PHRASE_TIERS.length
+      : Math.max(rawTierCount(progress.value.phraseStreaks), progress.value.tierHighWater)
   )
 
   const lifetimeAccuracy = computed(() =>
@@ -276,9 +285,13 @@ export function useProgress() {
     stats.seen++
     if (correct) stats.correct++
     p.chars[char] = stats
-    p.koch.attemptsInLesson++
-    p.koch.window.push(correct)
-    if (p.koch.window.length > UNLOCK_WINDOW) p.koch.window.shift()
+    // Free play answers may involve characters outside the current lesson, so
+    // they must not feed the unlock window — lifetime stats and XP still count
+    if (!freePlay.value) {
+      p.koch.attemptsInLesson++
+      p.koch.window.push(correct)
+      if (p.koch.window.length > UNLOCK_WINDOW) p.koch.window.shift()
+    }
     recordAnswer(correct)
   }
 
@@ -311,6 +324,7 @@ export function useProgress() {
 
   return {
     progress,
+    freePlay,
     level,
     levelProgress,
     xpToNextLevel,

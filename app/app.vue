@@ -1,5 +1,5 @@
 <script setup lang="ts">
-const { progress, level } = useProgress()
+const { progress, level, freePlay } = useProgress()
 
 // ---- Site-wide SEO -------------------------------------------------------
 // Each page sets its own title/description via useSeoMeta; this supplies the
@@ -174,6 +174,24 @@ const mobileLinks = [
               {{ progress.streakDays }}
             </span>
             <UBadge color="primary" variant="subtle">Lv {{ level }}</UBadge>
+            <button
+              type="button"
+              class="flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-medium ring-1 ring-inset transition"
+              :class="freePlay
+                ? 'bg-orange-500/15 text-orange-300 ring-orange-500/40 shadow-[0_0_10px_rgba(249,115,22,0.3)]'
+                : 'bg-zinc-800/60 text-zinc-400 ring-zinc-700 hover:bg-zinc-800 hover:text-zinc-200'"
+              :aria-pressed="freePlay"
+              :title="freePlay
+                ? 'Free play is on — every character and phrase tier is open. Click to return to your Koch progress.'
+                : 'Free play: unlock everything for this session without touching your progress'"
+              @click="freePlay = !freePlay"
+            >
+              <span
+                class="size-2 rounded-[2px] transition"
+                :class="freePlay ? 'bg-orange-400 shadow-[0_0_6px_rgba(251,146,60,0.9)]' : 'bg-zinc-600'"
+              />
+              Free play
+            </button>
           </div>
         </div>
 

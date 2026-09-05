@@ -4,7 +4,7 @@
 
 ## What it does
 
-- Koch method character training: characters are always sent at full speed (20 WPM by default) and only the spacing is stretched, per the ARRL Farnsworth formula. 41 characters are introduced in the LCWO Koch order; a new one unlocks at 90% accuracy over the last 30 answers. Modes: single characters, code groups, real words, callsigns.
+- Koch method character training: characters are always sent at full speed (20 WPM by default) and only the spacing is stretched, per the ARRL Farnsworth formula. 41 characters are introduced in the LCWO Koch order; a new one unlocks at 90% accuracy over the last 30 answers. Modes: single characters, code groups, real words, callsigns. A "Free play" toggle opens every character and phrase tier for the session without touching saved progress.
 - Ham vocabulary: six progressive tiers of Q-signals (QTH, QSL, QRZ, QRM...), prosigns (AR, SK, BT, KN), RST reports and abbreviations (TNX, HW CPY, 73...).
 - Sending practice: key with the keyboard, an on-screen touch key, or a real straight key, bug or iambic paddle connected over USB (a Raspberry Pi Pico bridge design is included in the repository). Iambic A and iambic B (Curtis B) modes, paddle reverse, adjustable weight and debounce. Live decoding validates each character; a fist report shows dah:dit ratio and timing consistency.
 - QSO simulator: a scripted first contact from CQ through RST/QTH/name exchange to 73, in both directions.

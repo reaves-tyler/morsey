@@ -12,7 +12,7 @@ import { generateCallsign, callsignsAvailable } from '~/utils/callsigns'
 import { UNLOCK_WINDOW } from '~/composables/useProgress'
 
 const {
-  progress, unlockedChars, kochWindowAccuracy, canAdvance, kochComplete,
+  progress, freePlay, unlockedChars, kochWindowAccuracy, canAdvance, kochComplete,
   addXp, recordCharAnswer, advanceLesson
 } = useProgress()
 const audio = useMorseAudio()
@@ -270,7 +270,10 @@ onBeforeUnmount(() => {
       <div>
         <h1 class="text-2xl font-semibold tracking-tight">Koch Trainer</h1>
         <p class="mt-1 text-sm text-zinc-400">
-          <template v-if="kochComplete">All characters unlocked — drill to build speed.</template>
+          <template v-if="freePlay">
+            <span class="text-orange-300">Free play</span> — all {{ unlockedChars.length }} characters open. Lesson progress is paused until you turn it off.
+          </template>
+          <template v-else-if="kochComplete">All characters unlocked — drill to build speed.</template>
           <template v-else>
             Lesson {{ progress.koch.lesson }} / {{ TOTAL_LESSONS }} —
             reach 90% over your last {{ UNLOCK_WINDOW }} answers to unlock the next character.
