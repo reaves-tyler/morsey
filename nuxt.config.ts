@@ -15,6 +15,15 @@ export default defineNuxtConfig({
     trailingSlash: true,
     indexable: true
   },
+  // Render every internal <NuxtLink> href with the trailing slash too, so
+  // links point straight at the canonical URL instead of costing crawlers a
+  // 301 hop (Search Console otherwise files every bare URL under "Page with
+  // redirect"). Applies to Nuxt UI's ULink/UButton as well.
+  experimental: {
+    defaults: {
+      nuxtLink: { trailingSlash: 'append' }
+    }
+  },
   sitemap: {
     // Personal, state-only pages have nothing for a search engine to index
     exclude: ['/settings', '/stats'],
