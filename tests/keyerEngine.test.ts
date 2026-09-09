@@ -293,6 +293,39 @@ describe('feel knobs — the rig menu', () => {
   })
 })
 
+describe('unknown patterns', () => {
+  // Straight key at 12 WPM: 80 ms tap = dit, 400 ms hold = dah, 100 ms gap
+  function key(engine: ReturnType<typeof makeHarness>['engine'], pattern: string) {
+    for (const el of pattern) {
+      engine.contactDown('tip')
+      tick(el === '.' ? 80 : 400)
+      engine.contactUp('tip')
+      tick(100)
+    }
+    tick(450)
+  }
+
+  it('prints a pattern that matches no character as *, never as ?', () => {
+    const { engine, state } = makeHarness({ keyType: 'straight' })
+    key(engine, '..--.') // one dit short of a question mark
+    expect(state.decoded).toBe('*')
+    expect(state.decoded).not.toBe('?')
+  })
+
+  it('still decodes the real question mark', () => {
+    const { engine, state } = makeHarness({ keyType: 'straight' })
+    key(engine, '..--..')
+    expect(state.decoded).toBe('?')
+  })
+
+  it('never lets a botched character equal any ITU target', async () => {
+    const { REVERSE_MORSE } = await import('../app/utils/morse')
+    const { engine, state } = makeHarness({ keyType: 'straight' })
+    key(engine, '........') // 8 dits: not a character (the error prosign)
+    expect(Object.values(REVERSE_MORSE)).not.toContain(state.decoded)
+  })
+})
+
 describe('housekeeping', () => {
   it('clear() drops pending symbols so no letter commits', () => {
     const { engine, state } = makeHarness({ keyType: 'straight' })

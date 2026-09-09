@@ -279,7 +279,7 @@ onBeforeUnmount(() => {
 
             <template v-if="!receiveOnly">
               <div class="min-h-14 rounded-lg border border-zinc-800 bg-zinc-950 p-3 font-mono tracking-wider">
-                <span class="text-zinc-100">{{ keyer.decoded.value || ' ' }}</span>
+                <DecodedText :text="keyer.decoded.value" />
                 <span class="text-emerald-400">{{ keyer.currentSymbols.value }}</span>
                 <span v-if="keyer.holdPreview.value" class="morsey-pulse text-amber-400">{{ keyer.holdPreview.value }}</span>
                 <span v-else-if="keyer.keyed.value" class="morsey-pulse text-emerald-400">▊</span>

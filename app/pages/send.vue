@@ -233,7 +233,7 @@ onBeforeUnmount(() => {
           <div class="h-5 text-sm">
             <span v-if="challengeState === 'correct'" class="text-emerald-400">Clean fist! +{{ lastXpGain }} XP</span>
             <span v-else-if="challengeState === 'wrong'" class="text-rose-400">
-              Copied <span class="font-mono">{{ keyer.decoded.value.trim() || '—' }}</span> — next one coming…
+              Copied <DecodedText v-if="keyer.decoded.value.trim()" class="font-mono" :text="keyer.decoded.value.trim()" /><span v-else class="font-mono">—</span> — next one coming…
             </span>
             <span v-else class="text-zinc-500">{{ sessionCorrect }} / {{ sessionTotal }} this session</span>
           </div>
@@ -317,7 +317,7 @@ onBeforeUnmount(() => {
             </UButton>
           </div>
           <div class="min-h-16 rounded-lg border border-zinc-800 bg-zinc-950 p-4 font-mono text-xl tracking-wider">
-            <span class="text-zinc-100">{{ keyer.decoded.value || ' ' }}</span>
+            <DecodedText :text="keyer.decoded.value" />
             <span class="text-emerald-400">{{ keyer.currentSymbols.value }}</span>
             <!-- Live preview of a manual element being held: starts as a dit,
                  flips to a dah the instant the hold crosses the threshold -->

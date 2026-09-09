@@ -1,5 +1,8 @@
 import { REVERSE_MORSE } from './morse'
 
+/** Printed for a keyed pattern that matches no character. Not in the ITU map, so it can never equal a target. */
+export const UNKNOWN_CHAR = '*'
+
 /**
  * Pure keyer engine — every timing state machine of the sending side, with
  * zero dependencies on Vue, Nuxt, audio, or real clocks. The host injects a
@@ -201,7 +204,10 @@ export class KeyerEngine {
 
   private finalizeLetter() {
     if (!this.symbols) return
-    const char = REVERSE_MORSE[this.symbols] ?? '?'
+    // Unknown patterns print as '*' (same convention as the stream decoder).
+    // Never '?': that is a real character (..--..) and a botched pattern would
+    // grade as a correct question mark on the send/QSO pages.
+    const char = REVERSE_MORSE[this.symbols] ?? UNKNOWN_CHAR
     this.symbols = ''
     this.host.onSymbols('')
     this.host.onLetter(char)
