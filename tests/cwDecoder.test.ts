@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { CwDecoder, charForPattern, PATTERN_TO_CHAR, type CwDecoderConfig } from '../app/utils/cwDecoder'
-import { renderCw, noiseRmsForSnr, encodeWav16, SAMPLE_PRESETS, type CwSynthOptions } from '../app/utils/cwSynth'
+import { readFileSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
+import { renderCw, noiseRmsForSnr, encodeWav16, decodeWav16, SAMPLE_PRESETS, type CwSynthOptions } from '../app/utils/cwSynth'
 import { MORSE } from '../app/utils/morse'
 
 /**
@@ -387,5 +389,56 @@ describe('synthesizer', () => {
       const floor = preset.difficulty <= 2 ? (preset.id.startsWith('farnsworth') ? 0.8 : 0.97) : preset.difficulty <= 4 ? 0.9 : 0.75
       expect(acc, `${preset.id}: "${text}"`).toBeGreaterThanOrEqual(floor)
     }
+  })
+})
+
+/**
+ * Real radio audio: takes recorded on the decode page from a Quansheng UV-K5
+ * (NR7Y firmware, CW mode, straight-keyed on the PTT by a novice) into a
+ * Focusrite Scarlett Solo, downsampled to 8 kHz. 700 Hz tone about 30 dB over
+ * the noise with a strong third harmonic at 2100 Hz 12 dB down. Takes 1–4
+ * were recorded hot (peaks within 1.5 dB of full scale); take 5 at a sane
+ * level (peak −13 dBFS) and it is the reference: every keyed letter exact.
+ * The fist is the limiting factor, not the signal: letter gaps run 4–7 dits
+ * and overlap the word gaps, so spacing is not asserted — only that the
+ * signal path is right (pitch, level, speed) and the letters come through.
+ * `letters` is what was actually keyed (the DE was skipped), spaces removed.
+ */
+describe('real K5 recordings', () => {
+  const dir = join(__dirname, 'fixtures', 'k5')
+  const TAKES: { file: string; letters: string; minAccuracy: number }[] = [
+    // first session: text not agreed in advance, so a letter-count floor only
+    { file: 'k5-cq-1.wav', letters: 'CQCQKR4NZNKR4NZNK', minAccuracy: 0.8 },
+    { file: 'k5-cq-2.wav', letters: 'CQCQKR4NZNKR4NZN', minAccuracy: 0.8 },
+    { file: 'k5-cq-3.wav', letters: 'CQCQKR4NZNKR4NZNK', minAccuracy: 0.8 },
+    // agreed text, every keyed letter copied
+    { file: 'k5-cq-4.wav', letters: 'CQCQCQKR4NZNKR4NZNKR4NZNK', minAccuracy: 1 },
+    // agreed text at a proper input level: the reference take. The third element of
+    // the second call's Z is 146 ms — between the sender's dits (~90) and dahs (~220) —
+    // and flips with the resampler, so one miss is allowed (exact at the native 48 kHz)
+    { file: 'k5-cq-5.wav', letters: 'CQCQCQKR4NZNKR4NZNKR4NZNK', minAccuracy: 0.96 }
+  ]
+
+  it('has a fixture entry for every WAV in the folder', () => {
+    expect(readdirSync(dir).filter(f => f.endsWith('.wav')).sort()).toEqual(TAKES.map(t => t.file).sort())
+  })
+
+  it.each(TAKES)('$file: copies the call through the harmonics and static', ({ file, letters, minAccuracy }) => {
+    const { samples, sampleRate } = decodeWav16(readFileSync(join(dir, file)).buffer as ArrayBuffer)
+    expect(sampleRate).toBe(8000)
+    let text = ''
+    const decoder = new CwDecoder({ sampleRate }, { onCharacter: ch => { text += ch }, onWordGap: () => { text += ' ' } })
+    for (let i = 0; i < samples.length; i += 1024) decoder.process(samples.subarray(i, Math.min(samples.length, i + 1024)))
+    decoder.flush()
+    const state = decoder.getState()
+    // signal path: the 700 Hz default sits on the K5's tone, strong and clean
+    expect(state.snrDb, `${file} SNR`).toBeGreaterThan(15)
+    expect(state.calibrated).toBe(true)
+    expect(state.wpm, `${file} speed`).toBeGreaterThan(8)
+    expect(state.wpm, `${file} speed`).toBeLessThan(16)
+    // copy: spacing aside, the letters are there
+    const got = text.replace(/\s+/g, '')
+    expect(got, `${file}: "${text}"`).toContain('KR4NZN')
+    expect(accuracy(got, letters), `${file}: "${text}"`).toBeGreaterThanOrEqual(minAccuracy)
   })
 })

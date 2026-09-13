@@ -322,3 +322,41 @@ export const SAMPLE_PRESETS: SamplePreset[] = [
     options: { text: 'QRP QRP DE N0CALL N0CALL PSE K', wpm: 16, snrDb: -3, seed: 18 }
   }
 ]
+
+/**
+ * Read a 16-bit PCM WAV (mono, or stereo mixed to mono) into float samples.
+ * Counterpart of `encodeWav16`, for replaying recorded takes (the decode
+ * page's Rec button) through the decoder tests.
+ */
+export function decodeWav16(data: ArrayBuffer): { samples: Float32Array; sampleRate: number } {
+  const v = new DataView(data)
+  const tag = (o: number) => String.fromCharCode(v.getUint8(o), v.getUint8(o + 1), v.getUint8(o + 2), v.getUint8(o + 3))
+  if (tag(0) !== 'RIFF' || tag(8) !== 'WAVE') throw new Error('not a WAV file')
+  let sampleRate = 0
+  let channels = 1
+  let bits = 16
+  let o = 12
+  while (o + 8 <= v.byteLength) {
+    const id = tag(o)
+    const len = v.getUint32(o + 4, true)
+    if (id === 'fmt ') {
+      if (v.getUint16(o + 8, true) !== 1) throw new Error('only PCM WAV is supported')
+      channels = v.getUint16(o + 10, true)
+      sampleRate = v.getUint32(o + 12, true)
+      bits = v.getUint16(o + 22, true)
+    } else if (id === 'data') {
+      if (bits !== 16) throw new Error(`only 16-bit WAV is supported (got ${bits})`)
+      const frames = Math.floor(len / (2 * channels))
+      const samples = new Float32Array(frames)
+      let p = o + 8
+      for (let i = 0; i < frames; i++) {
+        let acc = 0
+        for (let c = 0; c < channels; c++, p += 2) acc += v.getInt16(p, true)
+        samples[i] = acc / channels / 0x8000
+      }
+      return { samples, sampleRate }
+    }
+    o += 8 + len + (len & 1)
+  }
+  throw new Error('WAV has no data chunk')
+}
