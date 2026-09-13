@@ -55,7 +55,7 @@ const modules = computed(() => [
     to: '/decode',
     icon: 'i-lucide-audio-waveform',
     title: 'Stream Decoding',
-    subtitle: 'Live over-the-air CW terminal — line-in from your rig, or test samples',
+    subtitle: 'Live over-the-air CW terminal — aux, USB sound card or mic from your rig',
     stat: `${progress.value.settings.freq} Hz`,
     statLabel: 'pitch'
   },

@@ -1,7 +1,7 @@
 /**
  * Render the sample library (app/utils/cwSynth.ts → SAMPLE_PRESETS) to WAV
- * files under public/samples/cw so the decode page can stream them and so
- * they can be played into a sound card for hardware bring-up.
+ * files under public/samples/cw so they can be loaded on the decode page's
+ * file source or played into a sound card for hardware bring-up.
  *
  *   pnpm run samples
  *

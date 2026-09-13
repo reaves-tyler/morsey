@@ -1,13 +1,12 @@
 <script setup lang="ts">
 useSeoMeta({
   title: 'Live CW Decoder for Your Transceiver Audio',
-  description: 'Decode Morse code from your radio in real time, in the browser. Feed line-in or a USB sound card, tune the passband on a live spectrum display, and read a text terminal with automatic speed tracking, adaptive noise threshold and prosign detection. Test it first with built-in clean, noisy, QSB and QRM samples.',
+  description: 'Decode Morse code from your radio in real time, in the browser. Feed the rig into a laptop\'s aux jack, a USB sound card or a microphone, hear it in your headphones, tune the passband on a live spectrum display, and read a text terminal with automatic speed tracking, adaptive noise threshold and prosign detection.',
   ogTitle: 'Live CW Decoder · Morsey',
   ogDescription: 'Browser-based Morse decoder for rig audio: spectrum tuning, adaptive threshold, speed tracking.'
 })
 
-import type { SamplePreset } from '~/utils/cwSynth'
-import { DEFAULT_DEVICE } from '~/composables/useCwStreamDecoder'
+import { DEFAULT_DEVICE, isLive, type DecoderSource } from '~/composables/useCwStreamDecoder'
 
 /**
  * Stream decoding — a live CW terminal fed by the rig's audio.
@@ -26,9 +25,9 @@ const { progress } = useProgress()
 
 // ---- Source & lifecycle --------------------------------------------------------
 
-const SOURCES: { id: 'mic' | 'sample' | 'file'; label: string; icon: string; hint: string }[] = [
-  { id: 'mic', label: 'Radio input', icon: 'i-lucide-radio', hint: 'Line-in / microphone from the rig' },
-  { id: 'sample', label: 'Test sample', icon: 'i-lucide-flask-conical', hint: 'Synthesized band audio' },
+const SOURCES: { id: DecoderSource; label: string; icon: string; hint: string }[] = [
+  { id: 'line', label: 'Aux / line in', icon: 'i-lucide-cable', hint: 'Cable from the rig to the jack or a USB sound card' },
+  { id: 'mic', label: 'Microphone', icon: 'i-lucide-mic', hint: 'Mic held to the rig\'s speaker' },
   { id: 'file', label: 'Audio file', icon: 'i-lucide-file-audio', hint: 'WAV / MP3 recording' }
 ]
 
@@ -44,37 +43,40 @@ async function toggle() {
 }
 
 // ---- Recorder ---------------------------------------------------------------------
+// Rec → Pause → (Resume | Export | Discard). Independent of Start/Stop and of
+// the terminal: exporting never clears what has been decoded.
 
 const recordNote = ref('')
-function toggleRecording() {
-  if (dec.recording.value) {
-    saveRecording()
-    return
-  }
+const rec = dec.recordingState
+function recordOrResume() {
   if (dec.startRecording()) recordNote.value = ''
 }
-function saveRecording() {
-  const rec = dec.stopRecording()
-  if (!rec) {
+function exportRecording() {
+  const take = dec.exportRecording()
+  if (!take) {
     recordNote.value = 'Nothing captured.'
     return
   }
-  const url = URL.createObjectURL(rec.blob)
+  const url = URL.createObjectURL(take.blob)
   const a = document.createElement('a')
   const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19)
   a.href = url
   a.download = `morsey-rx-${stamp}.wav`
+  document.body.appendChild(a)
   a.click()
+  a.remove()
   setTimeout(() => URL.revokeObjectURL(url), 1000)
-  recordNote.value = `Saved ${a.download} · ${rec.seconds.toFixed(0)} s at ${(rec.sampleRate / 1000).toFixed(1)} kHz`
+  recordNote.value = `Saved ${a.download} · ${take.seconds.toFixed(0)} s at ${(take.sampleRate / 1000).toFixed(1)} kHz`
+}
+function discardRecording() {
+  dec.discardRecording()
+  recordNote.value = 'Take discarded.'
 }
 const recordLabel = computed(() => {
   const sec = dec.recordedSeconds.value
   const mb = dec.recordedBytes.value / 1048576
   return `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')} · ${mb.toFixed(1)} MB`
 })
-// a recording in progress is finalized (and offered for download) when listening stops
-watch(() => dec.listening.value, (on) => { if (!on && dec.recording.value) saveRecording() })
 
 const fileInput = ref<HTMLInputElement>()
 async function onFile(e: Event) {
@@ -87,22 +89,56 @@ async function onFile(e: Event) {
   if (!err) toggle()
 }
 
-function pickSample(p: SamplePreset) {
-  dec.sampleId.value = p.id
-  dec.source.value = 'sample'
-  if (dec.listening.value) dec.stop()
-  toggle()
-}
+// ---- Devices & monitor ---------------------------------------------------------------
 
 // (a select item may not carry an empty-string value, hence the sentinel)
-const deviceItems = computed(() => [
-  { label: 'Default input', value: DEFAULT_DEVICE },
-  ...dec.devices.value.filter(d => d.deviceId).map(d => ({ label: d.label, value: d.deviceId }))
+const inputItems = computed(() => {
+  const auto = dec.source.value === 'line'
+    ? (dec.suggestedLineDevice.value ? `Auto — ${dec.suggestedLineDevice.value.label}` : 'Auto — system default input')
+    : 'System default input'
+  return [
+    { label: auto, value: DEFAULT_DEVICE },
+    ...dec.devices.value.map(d => ({ label: d.label, value: d.deviceId }))
+  ]
+})
+const outputItems = computed(() => [
+  { label: 'System default output', value: DEFAULT_DEVICE },
+  ...dec.outputs.value.map(d => ({ label: d.label, value: d.deviceId }))
 ])
+/** the device setting that belongs to the selected live source */
+const inputDevice = computed({
+  get: () => (dec.source.value === 'mic' ? s.value.micDeviceId : s.value.lineDeviceId),
+  set: (v: string) => {
+    if (dec.source.value === 'mic') s.value.micDeviceId = v
+    else s.value.lineDeviceId = v
+  }
+})
+/** the monitor switch that belongs to the selected source */
+const monitorOn = computed({
+  get: () => (dec.source.value === 'mic' ? s.value.monitorMic : s.value.monitor),
+  set: (v: boolean) => {
+    if (dec.source.value === 'mic') s.value.monitorMic = v
+    else s.value.monitor = v
+  }
+})
+const monitorDb = computed(() => {
+  const g = s.value.monitorLevel
+  return g <= 0 ? '−∞' : `${g >= 1 ? '+' : ''}${(20 * Math.log10(g)).toFixed(0)}`
+})
 
-function selectSource(id: 'mic' | 'sample' | 'file') {
+const detecting = ref(false)
+/** ask once for capture permission so the device list shows real names */
+async function detectDevices() {
+  detecting.value = true
+  await dec.requestDevicePermission()
+  detecting.value = false
+}
+
+function selectSource(id: DecoderSource) {
   if (dec.listening.value) dec.stop()
   dec.source.value = id
+  // picking a live source is the moment the operator needs device names
+  if (isLive(id) && !dec.devicesLabelled.value) detectDevices()
 }
 
 onMounted(() => { dec.refreshDevices() })
@@ -317,7 +353,6 @@ function matchRigPitch() {
   s.value.centerHz = progress.value.settings.freq
 }
 
-const difficultyDots = (d: number) => Array.from({ length: 5 }, (_, i) => i < d)
 </script>
 
 <template>
@@ -326,7 +361,7 @@ const difficultyDots = (d: number) => Array.from({ length: 5 }, (_, i) => i < d)
       <div>
         <h1 class="text-2xl font-semibold tracking-tight">Stream decoding</h1>
         <p class="mt-1 text-sm text-zinc-400">
-          Live over-the-air CW terminal. Feed it your rig's audio, or run a test sample to see it work before the hardware arrives.
+          Live over-the-air CW terminal. Cable the rig into your laptop's aux jack or a USB sound card, or hold a microphone to its speaker — the audio is passed through to your headphones while it decodes.
         </p>
       </div>
       <div class="flex items-center gap-2">
@@ -491,7 +526,7 @@ const difficultyDots = (d: number) => Array.from({ length: 5 }, (_, i) => i < d)
           :class="dec.listening.value ? 'animate-pulse' : 'opacity-30'"
         />
         <p v-if="!dec.text.value && !dec.listening.value" class="text-sm text-zinc-600">
-          Nothing decoded yet. Pick a source below and press Start — or click a test sample.
+          Nothing decoded yet. Pick an input below and press Start listening.
         </p>
       </div>
       <div v-if="dec.playbackProgress.value > 0 && dec.listening.value" class="mt-2">
@@ -520,62 +555,34 @@ const difficultyDots = (d: number) => Array.from({ length: 5 }, (_, i) => i < d)
         </div>
 
         <!-- per-source options -->
-        <div v-if="dec.source.value === 'mic'" class="mt-4 space-y-3">
+        <div v-if="isLive(dec.source.value)" class="mt-4 space-y-3">
           <div class="flex items-center gap-2">
             <USelect
-              v-model="s.deviceId"
-              :items="deviceItems"
+              v-model="inputDevice"
+              :items="inputItems"
               value-key="value"
               size="sm"
               class="flex-1"
-              placeholder="Default input"
+              icon="i-lucide-audio-lines"
             />
-            <UButton size="sm" variant="soft" color="neutral" icon="i-lucide-refresh-cw" title="Refresh device list" @click="dec.refreshDevices()" />
-          </div>
-          <p class="text-xs leading-snug text-zinc-500">
-            Connect the rig's headphone / line-out to your computer's line-in or a USB sound card, keep the rig's AF gain moderate (the meter should sit around −20 dB on a signal), and set the pitch to the rig's CW pitch — the QMX defaults to 700 Hz. Browser audio processing (AGC, noise suppression, echo cancellation) is disabled automatically. Device names appear after the first permission grant.
-          </p>
-        </div>
-
-        <div v-else-if="dec.source.value === 'sample'" class="mt-4 space-y-2">
-          <div class="flex items-center justify-between">
-            <span class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Sample library · easiest to hardest</span>
-            <label class="flex items-center gap-2 text-xs text-zinc-400">
-              <USwitch v-model="s.monitor" size="xs" /> Hear it
-            </label>
-          </div>
-          <div class="grid gap-1.5 sm:grid-cols-2">
-            <button
-              v-for="p in dec.presets"
-              :key="p.id"
-              class="flex items-start gap-2 rounded border px-3 py-2 text-left transition"
-              :class="dec.sampleId.value === p.id
-                ? 'border-emerald-500/70 bg-emerald-500/10'
-                : 'border-zinc-800 bg-zinc-900/60 hover:border-zinc-600'"
-              @click="pickSample(p)"
+            <UButton
+              size="sm"
+              variant="soft"
+              color="neutral"
+              :icon="dec.devicesLabelled.value ? 'i-lucide-refresh-cw' : 'i-lucide-scan-search'"
+              :loading="detecting"
+              :title="dec.devicesLabelled.value ? 'Refresh device list' : 'Detect devices (asks for audio permission once, so the inputs show their names)'"
+              @click="detectDevices"
             >
-              <UIcon
-                :name="dec.listening.value && dec.sampleId.value === p.id ? 'i-lucide-square' : 'i-lucide-play'"
-                class="mt-0.5 size-3.5 shrink-0"
-                :class="dec.sampleId.value === p.id ? 'text-emerald-400' : 'text-zinc-500'"
-              />
-              <span class="min-w-0 flex-1">
-                <span class="flex items-center justify-between gap-2">
-                  <span class="text-sm font-medium text-zinc-200">{{ p.name }}</span>
-                  <span class="flex gap-0.5" :title="`difficulty ${p.difficulty} of 5`">
-                    <span
-                      v-for="(on, i) in difficultyDots(p.difficulty)"
-                      :key="i"
-                      class="size-1.5 rounded-full"
-                      :class="on ? (p.difficulty >= 4 ? 'bg-rose-400' : p.difficulty === 3 ? 'bg-amber-400' : 'bg-emerald-400') : 'bg-zinc-700'"
-                    />
-                  </span>
-                </span>
-                <span class="block text-[11px] leading-snug text-zinc-500">{{ p.description }}</span>
-                <span class="mt-0.5 block truncate font-mono text-[10px] text-zinc-600">{{ p.options.text }}</span>
-              </span>
-            </button>
+              <span v-if="!dec.devicesLabelled.value">Detect</span>
+            </UButton>
           </div>
+          <p v-if="dec.source.value === 'line'" class="text-xs leading-snug text-zinc-500">
+            Run a cable from the rig's headphone / speaker jack to the laptop's aux (combo) jack or a USB sound card, and pick that input here — the system default is usually the built-in microphone. Keep the rig's AF gain moderate so the meter sits around −20 dB on a signal, and set the pitch to the rig's CW pitch. Browser AGC, noise suppression and echo cancellation are switched off automatically.
+          </p>
+          <p v-else class="text-xs leading-snug text-zinc-500">
+            Hold the microphone close to the rig's speaker in a quiet room. Wear headphones if you monitor: a mic feeding the speakers is a feedback loop. The keyer sidetone is muted while the microphone is live so it isn't decoded too.
+          </p>
         </div>
 
         <div v-else class="mt-4 space-y-3">
@@ -584,13 +591,52 @@ const difficultyDots = (d: number) => Array.from({ length: 5 }, (_, i) => i < d)
               Choose file
             </UButton>
             <span class="truncate font-mono text-xs text-zinc-400">{{ dec.fileName.value || 'no file loaded' }}</span>
-            <label class="ml-auto flex items-center gap-2 text-xs text-zinc-400">
-              <USwitch v-model="s.monitor" size="xs" /> Hear it
-            </label>
           </div>
           <input ref="fileInput" type="file" accept="audio/*" class="hidden" @change="onFile">
           <p class="text-xs leading-snug text-zinc-500">
-            Any format the browser can decode. The generated sample WAVs live under <code class="text-zinc-400">/samples/cw/</code> if you want to play them through a sound card into a real input.
+            Any format the browser can decode — including the WAVs the Rec button saves. The synthesized test clips live under <code class="text-zinc-400">/samples/cw/</code> if you want to play them through a sound card into a real input.
+          </p>
+        </div>
+
+        <!-- monitor: input → headphones passthrough -->
+        <div class="mt-4 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2.5">
+          <div class="flex items-center justify-between gap-3">
+            <label class="flex items-center gap-2 text-sm">
+              <USwitch v-model="monitorOn" size="sm" />
+              <span class="flex items-center gap-1.5">
+                <UIcon name="i-lucide-headphones" class="size-4 text-zinc-400" />
+                Monitor in headphones
+              </span>
+            </label>
+            <span class="flex items-center gap-3 font-mono text-xs">
+              <span
+                v-if="dec.listening.value && dec.latencyMs.value > 0"
+                :class="dec.latencyMs.value > 60 ? 'text-amber-400' : 'text-zinc-400'"
+                title="Browser audio round trip (capture buffer + output buffer). Not adjustable from the page — see the note below."
+              >~{{ dec.latencyMs.value }} ms delay</span>
+              <span :class="monitorOn ? 'text-emerald-400' : 'text-zinc-600'">{{ monitorDb }} dB</span>
+            </span>
+          </div>
+          <USlider v-model="s.monitorLevel" :min="0" :max="2" :step="0.05" :disabled="!monitorOn" class="mt-2" />
+          <div v-if="dec.canSelectOutput" class="mt-2 flex items-center gap-2">
+            <USelect
+              v-model="s.outputDeviceId"
+              :items="outputItems"
+              value-key="value"
+              size="sm"
+              class="flex-1"
+              icon="i-lucide-speaker"
+              :disabled="!monitorOn"
+            />
+          </div>
+          <p class="mt-1.5 text-xs leading-snug text-zinc-500">
+            <template v-if="dec.source.value === 'mic'">
+              Off by default for a microphone — turn it on only with headphones plugged in.
+            </template>
+            <template v-else>
+              Plugging into the rig's headphone jack silences its speaker; the input is passed straight through to your headphones so you still hear the band. The rig's volume sets the decoder level, this sets yours.
+              The browser adds a few tens of milliseconds each way, which you will notice when keying. For a zero-delay sidetone, put a Y-splitter on the rig's headphone jack — one leg to the laptop, one to your headphones — and switch this monitor off.
+            </template>
           </p>
         </div>
 
@@ -605,23 +651,56 @@ const difficultyDots = (d: number) => Array.from({ length: 5 }, (_, i) => i < d)
           >
             {{ dec.listening.value ? 'Stop' : 'Start listening' }}
           </UButton>
-          <UButton
-            size="lg"
-            variant="soft"
-            :color="dec.recording.value ? 'error' : 'neutral'"
-            :icon="dec.recording.value ? 'i-lucide-square' : 'i-lucide-circle'"
-            :disabled="!dec.listening.value && !dec.recording.value"
-            class="font-mono uppercase tracking-wider"
-            :class="dec.recording.value ? 'animate-pulse' : ''"
-            title="Record the raw input to a WAV file (what the decoder heard, before filtering) — useful for replaying real on-air audio through the decoder tests"
-            @click="toggleRecording"
-          >
-            {{ dec.recording.value ? `Rec ${recordLabel}` : 'Rec' }}
-          </UButton>
+          <!-- recorder: Rec → Pause → Resume / Export / Discard -->
+          <div class="flex items-center gap-1.5">
+            <UButton
+              v-if="rec === 'idle'"
+              size="lg"
+              variant="soft"
+              color="neutral"
+              icon="i-lucide-circle"
+              :disabled="!dec.listening.value"
+              class="font-mono uppercase tracking-wider"
+              title="Record the raw input to a WAV take (what the decoder hears, before filtering) — for replaying real on-air audio through the decoder tests"
+              @click="recordOrResume"
+            >
+              Rec
+            </UButton>
+            <UButton
+              v-else-if="rec === 'recording'"
+              size="lg"
+              variant="soft"
+              color="error"
+              icon="i-lucide-pause"
+              class="animate-pulse font-mono uppercase tracking-wider"
+              title="Pause the take"
+              @click="dec.pauseRecording()"
+            >
+              Rec {{ recordLabel }}
+            </UButton>
+            <template v-else>
+              <UButton
+                size="lg"
+                variant="soft"
+                color="error"
+                icon="i-lucide-circle"
+                :disabled="!dec.listening.value"
+                class="font-mono uppercase tracking-wider"
+                :title="dec.listening.value ? 'Resume the take' : 'Start listening to resume the take'"
+                @click="recordOrResume"
+              >
+                {{ recordLabel }}
+              </UButton>
+              <UButton size="lg" variant="soft" color="primary" icon="i-lucide-download" class="font-mono uppercase tracking-wider" title="Download the take as WAV and start fresh" @click="exportRecording">
+                Export
+              </UButton>
+              <UButton size="lg" variant="ghost" color="neutral" icon="i-lucide-trash-2" title="Discard the take" @click="discardRecording" />
+            </template>
+          </div>
           <p v-if="dec.error.value" class="text-xs leading-snug text-rose-400">{{ dec.error.value }}</p>
           <p v-else-if="recordNote" class="text-xs leading-snug text-zinc-400">{{ recordNote }}</p>
           <p v-else-if="dec.listening.value && dec.source.value === 'mic'" class="text-xs leading-snug text-zinc-500">
-            Keyer sidetone is muted while the radio is connected.
+            Keyer sidetone is muted while the microphone is live.
           </p>
         </div>
       </UCard>

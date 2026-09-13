@@ -8,7 +8,7 @@
 - Ham vocabulary: six progressive tiers of Q-signals (QTH, QSL, QRZ, QRM...), prosigns (AR, SK, BT, KN), RST reports and abbreviations (TNX, HW CPY, 73...).
 - Sending practice: key with the keyboard, an on-screen touch key, or a real straight key, bug or iambic paddle connected over USB (a Raspberry Pi Pico bridge design is included in the repository). Iambic A and iambic B (Curtis B) modes, paddle reverse, adjustable weight and debounce. Live decoding validates each character; a fist report shows dah:dit ratio and timing consistency.
 - QSO simulator: a scripted first contact from CQ through RST/QTH/name exchange to 73, in both directions.
-- Live CW decoder: feeds transceiver audio (line-in or USB sound card) through a spectrum display with click-to-tune passband, adaptive noise threshold, automatic speed tracking and prosign detection. Built-in test samples cover clean, hand-sent, noisy, QSB and QRM conditions.
+- Live CW decoder: feeds transceiver audio (aux/line-in, USB sound card or microphone) through a spectrum display with click-to-tune passband, adaptive noise threshold, automatic speed tracking and prosign detection, and passes the audio through to headphones with its own volume and output-device selection. Recordings can be saved as WAV and replayed from file.
 - Simulated band conditions (QRN, QSB, QRM) for receive training.
 - Progress: XP, levels, daily streak, per-character accuracy heatmap, 30-day activity, export/import of progress as JSON.
 

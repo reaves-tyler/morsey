@@ -1,5 +1,5 @@
 import { CwDecoder, DEFAULT_DECODER_CONFIG, type CwDecoderConfig, type CwDecoderState } from '~/utils/cwDecoder'
-import { renderCw, SAMPLE_PRESETS, toInt16, wavHeader16, type CwSynthOptions } from '~/utils/cwSynth'
+import { toInt16, wavHeader16 } from '~/utils/cwSynth'
 
 /**
  * Browser adapter for the pure CW stream decoder (utils/cwDecoder.ts).
@@ -11,16 +11,35 @@ import { renderCw, SAMPLE_PRESETS, toInt16, wavHeader16, type CwSynthOptions } f
  * element lengths.
  *
  *   [source] → [BiquadFilter bandpass] → [AudioWorklet: PCM forwarder] → decoder
- *      └────→ [AnalyserNode] (spectrum display, unfiltered so QRM is visible)
+ *      ├────→ [AnalyserNode] (spectrum display, unfiltered so QRM is visible)
+ *      ├────→ [AudioWorklet: PCM forwarder] → recorder (raw WAV capture)
+ *      └────→ [GainNode: monitor] → destination (headphone passthrough)
  *
- * Sources: a microphone / line input (the radio), a synthesized sample from
- * the preset library (for testing without hardware), or an audio file.
+ * Sources: the rig on a line / aux input (a laptop's combo jack or a USB
+ * sound card), a microphone held to the rig's speaker, or an audio file.
+ * `line` and `mic` are the same browser API (getUserMedia) with separate
+ * device memories — a laptop lists its jack and its built-in mic as two
+ * inputs and "default" is almost always the mic, which is exactly the wrong
+ * one for a cable from the radio.
+ *
+ * Monitor: plugging into a rig's headphone jack silences its speaker, so the
+ * live input is passed straight through to the computer's output (headphones)
+ * at an adjustable level. Line inputs monitor by default; a microphone into
+ * speakers is a feedback loop, so the mic monitor defaults off and the UI
+ * says to wear headphones. The output device can be chosen where the browser
+ * supports `AudioContext.setSinkId` (Chromium).
  *
  * Module-level singleton like useKeyer: the graph survives navigation, like
  * a rig left switched on; only Stop tears it down.
  */
 
-export type DecoderSource = 'mic' | 'sample' | 'file'
+export type DecoderSource = 'line' | 'mic' | 'file'
+
+/** the two live (getUserMedia) sources */
+export type LiveSource = Exclude<DecoderSource, 'file'>
+export function isLive(src: DecoderSource): src is LiveSource {
+  return src === 'line' || src === 'mic'
+}
 
 export interface DecodeSettings {
   centerHz: number
@@ -33,16 +52,32 @@ export interface DecodeSettings {
   speedAveraging: number
   initialWpm: number
   lockSpeed: boolean
-  /** route the audio being decoded to the speakers (samples/files only — never the mic) */
+  /** pass the line / aux input and audio files through to the output (headphones) */
   monitor: boolean
+  /** pass a live microphone through to the output — off by default (feedback through speakers) */
+  monitorMic: boolean
+  /** monitor gain, 0–2 (unity = 1); the rig's AF gain sets the decoder level, this sets the headphone level */
+  monitorLevel: number
   /** apply the analog-style bandpass pre-filter before the detector */
   prefilter: boolean
-  /** remembered input device (`DEFAULT_DEVICE` = let the browser choose) */
-  deviceId: string
+  /** remembered line / aux input device (`DEFAULT_DEVICE` = auto: the jack or USB codec if one is recognised, else the browser default) */
+  lineDeviceId: string
+  /** remembered microphone device (`DEFAULT_DEVICE` = browser default) */
+  micDeviceId: string
+  /** remembered output device for the monitor (`DEFAULT_DEVICE` = browser default; needs `setSinkId`) */
+  outputDeviceId: string
 }
 
-/** Sentinel for "browser default input" — select items may not use an empty string as a value */
+/** Sentinel for "browser default / auto" — select items may not use an empty string as a value */
 export const DEFAULT_DEVICE = 'default'
+
+/**
+ * Input labels that look like a cable input rather than a microphone. Browsers
+ * expose no "line-in" kind, so this is a label heuristic: combo jacks report
+ * "External Microphone" / "Headset", desktop codecs "Line In", USB sound
+ * cards their product name.
+ */
+const LINE_LABEL = /line|aux|external|headset|jack|usb|codec|cable|sound ?card|interface/i
 
 const SETTINGS_KEY = 'morsey-decode-v1'
 
@@ -58,10 +93,20 @@ function defaultSettings(): DecodeSettings {
     initialWpm: DEFAULT_DECODER_CONFIG.initialWpm,
     lockSpeed: false,
     monitor: true,
+    monitorMic: false,
+    monitorLevel: 1,
     prefilter: true,
-    deviceId: DEFAULT_DEVICE
+    lineDeviceId: DEFAULT_DEVICE,
+    micDeviceId: DEFAULT_DEVICE,
+    outputDeviceId: DEFAULT_DEVICE
   }
 }
+
+export interface AudioDevice {
+  deviceId: string
+  label: string
+}
+
 
 export interface SignalReport {
   /** S-units 0–9 from the in-passband signal-to-noise (noise floor ≈ S3, 36 dB over it = S9) */
@@ -111,20 +156,38 @@ registerProcessor('morsey-pcm-forwarder', PcmForwarder)
 // ---- Shared state (module-level) ------------------------------------------------
 
 const listening = ref(false)
-const source = ref<DecoderSource>('sample')
+const source = ref<DecoderSource>('line')
 const text = ref('')
 const pattern = ref('')
 const error = ref('')
-const devices = ref<{ deviceId: string; label: string }[]>([])
-const sampleId = ref(SAMPLE_PRESETS[0]!.id)
+/** audio inputs (labels are empty until the first permission grant — see `requestDevicePermission`) */
+const devices = ref<AudioDevice[]>([])
+/** audio outputs — only populated where the browser can route the context (`setSinkId`) */
+const outputs = ref<AudioDevice[]>([])
+/** whether at least one input carries a label, i.e. permission has been granted once */
+const devicesLabelled = computed(() => devices.value.some(d => d.label && !/^Input \d+$/.test(d.label)))
 const fileName = ref('')
-const playbackProgress = ref(0) // 0..1 for sample/file sources
+const playbackProgress = ref(0) // 0..1 for the file source
+/**
+ * Measured monitor delay, input → headphones, in ms (0 = unknown). Capture
+ * buffer (track settings) + context base latency + output device latency.
+ * The browser's shared-mode audio stack sets the floor here, not the graph:
+ * for a zero-delay sidetone the operator splits the rig's headphone out.
+ */
+const latencyMs = ref(0)
 const meter = ref<CwDecoderState>({
   magnitude: 0, floor: 0, peak: 0, threshold: 0, snrDb: 0, keyed: false,
   ditMs: 60, dahMs: 180, wpm: 20, letterGapMs: 180, wordGapMs: 420, pattern: '', timeMs: 0, calibrated: false, confidence: 1
 })
-/** raw-input recorder (for capturing real on-air audio to replay through the decoder tests) */
-const recording = ref(false)
+/**
+ * Raw-input recorder (for capturing real on-air audio to replay through the
+ * decoder tests). A take is independent of listening: pause keeps it, Stop
+ * listening only pauses it, export downloads and ends it, discard drops it.
+ * Nothing here touches the decoder or the terminal.
+ */
+export type RecordingState = 'idle' | 'recording' | 'paused'
+const recordingState = ref<RecordingState>('idle')
+const recording = computed(() => recordingState.value === 'recording')
 const recordedSeconds = ref(0)
 const recordedBytes = ref(0)
 /** ~10 minutes at 48 kHz, 16-bit */
@@ -155,6 +218,14 @@ let playbackDuration = 0
 let settingsLoaded = false
 let watchersAttached = false
 let loadedFile: AudioBuffer | null = null
+let deviceListenerAttached = false
+
+/**
+ * `AudioContext.setSinkId` is Chromium-only so far; Firefox/Safari follow the OS
+ * default output. Decided after hydration (the prerendered HTML has no output
+ * picker, so deciding during setup would be a hydration mismatch).
+ */
+const canSelectOutput = ref(false)
 
 function toEngineConfig(s: DecodeSettings): Partial<CwDecoderConfig> {
   return {
@@ -184,17 +255,28 @@ export function useCwStreamDecoder() {
   if (import.meta.client && !settingsLoaded) {
     settingsLoaded = true
     onNuxtReady(() => {
+      canSelectOutput.value = typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype
       try {
         const raw = localStorage.getItem(SETTINGS_KEY)
-        if (raw) settings.value = { ...defaultSettings(), ...JSON.parse(raw) }
-        if (!settings.value.deviceId) settings.value.deviceId = DEFAULT_DEVICE
+        if (raw) {
+          const stored = JSON.parse(raw) as Partial<DecodeSettings> & { deviceId?: string }
+          // v1 had a single "Radio input" device: that was the cable from the rig
+          if (stored.deviceId && !stored.lineDeviceId) stored.lineDeviceId = stored.deviceId
+          delete stored.deviceId
+          settings.value = { ...defaultSettings(), ...stored }
+        }
+        for (const k of ['lineDeviceId', 'micDeviceId', 'outputDeviceId'] as const) {
+          if (!settings.value[k]) settings.value[k] = DEFAULT_DEVICE
+        }
       } catch { /* corrupt or unavailable storage: keep defaults */ }
     })
   }
   if (import.meta.client && !watchersAttached) {
     watchersAttached = true
     let prevPrefilter = settings.value.prefilter
-    let prevDevice = settings.value.deviceId
+    let prevLine = settings.value.lineDeviceId
+    let prevMic = settings.value.micDeviceId
+    let prevOut = settings.value.outputDeviceId
     watch(settings, (s) => {
       try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)) } catch { /* storage full/unavailable */ }
       applySettings(s)
@@ -202,12 +284,44 @@ export function useCwStreamDecoder() {
         prevPrefilter = s.prefilter
         rewire()
       }
-      if (s.deviceId !== prevDevice) {
-        prevDevice = s.deviceId
-        // a live radio input follows the device choice immediately
+      // a live input follows its device choice immediately
+      if (s.lineDeviceId !== prevLine) {
+        prevLine = s.lineDeviceId
+        if (listening.value && source.value === 'line') start()
+      }
+      if (s.micDeviceId !== prevMic) {
+        prevMic = s.micDeviceId
         if (listening.value && source.value === 'mic') start()
       }
+      if (s.outputDeviceId !== prevOut) {
+        prevOut = s.outputDeviceId
+        applySink()
+      }
     }, { deep: true })
+  }
+  if (import.meta.client && !deviceListenerAttached && navigator.mediaDevices?.addEventListener) {
+    deviceListenerAttached = true
+    // plugging a cable into a combo jack or a USB codec changes the list
+    navigator.mediaDevices.addEventListener('devicechange', () => { refreshDevices() })
+  }
+
+  /** what the monitor gain should be for the current source and settings */
+  function monitorTarget(s: DecodeSettings): number {
+    const on = source.value === 'mic' ? s.monitorMic : s.monitor
+    return on ? Math.max(0, Math.min(2, s.monitorLevel)) : 0
+  }
+
+  /** route the context to the chosen output where the browser allows it */
+  async function applySink() {
+    if (!ctx || !canSelectOutput.value) return
+    const id = settings.value.outputDeviceId
+    try {
+      // an empty string means "system default" to setSinkId
+      await (ctx as AudioContext & { setSinkId(id: string): Promise<void> }).setSinkId(id === DEFAULT_DEVICE ? '' : id)
+    } catch {
+      // device unplugged since it was remembered: fall back to the default rather than staying silent
+      settings.value.outputDeviceId = DEFAULT_DEVICE
+    }
   }
 
   function applySettings(s: DecodeSettings) {
@@ -216,7 +330,7 @@ export function useCwStreamDecoder() {
       filterNode.frequency.setTargetAtTime(s.centerHz, ctx.currentTime, 0.02)
       filterNode.Q.setTargetAtTime(prefilterQ(s), ctx.currentTime, 0.02)
     }
-    if (monitorGain) monitorGain.gain.value = s.monitor && source.value !== 'mic' ? 1 : 0
+    if (monitorGain && ctx) monitorGain.gain.setTargetAtTime(monitorTarget(s), ctx.currentTime, 0.02)
   }
 
   /** (re)connect source → [filter] → tap, honouring the prefilter toggle */
@@ -280,9 +394,11 @@ export function useCwStreamDecoder() {
 
   async function ensureGraph(): Promise<AudioContext> {
     if (ctx) return ctx
-    const audio = new AudioContext()
+    // 'interactive' keeps the input → headphone passthrough latency at the hardware minimum
+    const audio = new AudioContext({ latencyHint: 'interactive' })
     ctx = audio
     makeDecoder(audio.sampleRate)
+    applySink()
 
     filterNode = audio.createBiquadFilter()
     filterNode.type = 'bandpass'
@@ -318,10 +434,75 @@ export function useCwStreamDecoder() {
     if (!import.meta.client || !navigator.mediaDevices?.enumerateDevices) return
     try {
       const all = await navigator.mediaDevices.enumerateDevices()
-      devices.value = all
+      // Chromium adds "default" / "communications" aliases of a real device;
+      // "default" collides with our sentinel and both would list a device twice
+      const real = all.filter(d => d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications')
+      devices.value = real
         .filter(d => d.kind === 'audioinput')
         .map((d, i) => ({ deviceId: d.deviceId, label: d.label || `Input ${i + 1}` }))
+      outputs.value = canSelectOutput.value
+        ? real.filter(d => d.kind === 'audiooutput').map((d, i) => ({ deviceId: d.deviceId, label: d.label || `Output ${i + 1}` }))
+        : []
     } catch { /* permissions not granted yet: labels come after the first getUserMedia */ }
+  }
+
+  /**
+   * Device labels are blank until the page has been granted audio capture once.
+   * Ask for it (any input), release the stream immediately and re-enumerate, so
+   * the operator can pick the jack by name before pressing Start.
+   */
+  async function requestDevicePermission(): Promise<string | null> {
+    if (!import.meta.client || !navigator.mediaDevices?.getUserMedia) return 'This browser cannot capture audio input.'
+    if (devicesLabelled.value) {
+      await refreshDevices()
+      return null
+    }
+    try {
+      const probe = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+      for (const track of probe.getTracks()) track.stop()
+      await refreshDevices()
+      return null
+    } catch (err: any) {
+      const msg = describeCaptureError(err)
+      error.value = msg
+      return msg
+    }
+  }
+
+  /** The line input the auto setting would pick: the first jack / USB-looking device, if any */
+  const suggestedLineDevice = computed<AudioDevice | null>(() =>
+    devices.value.find(d => LINE_LABEL.test(d.label) && !/^Input \d+$/.test(d.label)) ?? null
+  )
+
+  /** Resolve a source's device setting to what getUserMedia should be asked for (null = browser default) */
+  function resolveDevice(src: LiveSource): string | null {
+    const chosen = src === 'line' ? settings.value.lineDeviceId : settings.value.micDeviceId
+    if (chosen && chosen !== DEFAULT_DEVICE) return chosen
+    if (src === 'line') return suggestedLineDevice.value?.deviceId ?? null
+    return null
+  }
+
+  /** input → output delay estimate in ms from what the browser is willing to report */
+  function measureLatency(audio: AudioContext, s: MediaStream): number {
+    const track = s.getAudioTracks()[0]
+    const input = track ? Number((track.getSettings() as Record<string, unknown>).latency ?? 0) : 0
+    const output = Number((audio as AudioContext & { outputLatency?: number }).outputLatency ?? 0)
+    return Math.round((input + audio.baseLatency + output) * 1000)
+  }
+
+  function describeCaptureError(err: any): string {
+    switch (err?.name) {
+      case 'NotAllowedError':
+      case 'SecurityError':
+        return 'Audio capture was denied. Allow it in the browser’s site settings and try again.'
+      case 'NotFoundError':
+        return 'No audio input device found.'
+      case 'OverconstrainedError':
+      case 'NotReadableError':
+        return 'The selected input isn’t available — plug it in, or pick another device.'
+      default:
+        return err?.message ?? 'Could not start the decoder.'
+    }
   }
 
   function tick() {
@@ -350,14 +531,6 @@ export function useCwStreamDecoder() {
     playbackProgress.value = 0
   }
 
-  /** Render a preset (or custom options) into an AudioBuffer at the context rate */
-  function renderSample(audio: AudioContext, opts: Omit<CwSynthOptions, 'sampleRate'>): AudioBuffer {
-    const { samples, sampleRate } = renderCw({ sampleRate: audio.sampleRate, ...opts })
-    const buffer = audio.createBuffer(1, samples.length, sampleRate)
-    buffer.copyToChannel(samples as Float32Array<ArrayBuffer>, 0)
-    return buffer
-  }
-
   function playBuffer(audio: AudioContext, buffer: AudioBuffer) {
     bufferSource = audio.createBufferSource()
     bufferSource.buffer = buffer
@@ -366,7 +539,7 @@ export function useCwStreamDecoder() {
     playbackDuration = buffer.duration
     bufferSource.onended = () => {
       decoder?.flush()
-      if (listening.value && source.value !== 'mic') stop()
+      if (listening.value && source.value === 'file') stop()
     }
     rewire()
     bufferSource.start()
@@ -376,7 +549,7 @@ export function useCwStreamDecoder() {
    * Start decoding from the selected source. Returns null on success or an
    * operator-readable error.
    */
-  async function start(customSample?: Omit<CwSynthOptions, 'sampleRate'>): Promise<string | null> {
+  async function start(): Promise<string | null> {
     if (!import.meta.client) return null
     error.value = ''
     try {
@@ -387,8 +560,11 @@ export function useCwStreamDecoder() {
       pattern.value = ''
       elements.value = []
       recentChars.value = []
+      // the terminal keeps its copy across restarts; separate the sessions
+      if (text.value && !text.value.endsWith(' ')) text.value += ' '
 
-      if (source.value === 'mic') {
+      const src = source.value
+      if (isLive(src)) {
         if (!navigator.mediaDevices?.getUserMedia) throw new Error('This browser cannot capture audio input.')
         // Everything a voice-call browser does to audio is wrong for CW:
         // AGC pumps on every element, noise suppression eats the tone,
@@ -399,37 +575,34 @@ export function useCwStreamDecoder() {
           autoGainControl: false,
           channelCount: 1
         }
-        if (settings.value.deviceId && settings.value.deviceId !== DEFAULT_DEVICE) {
-          constraints.deviceId = { exact: settings.value.deviceId }
-        }
+        const deviceId = resolveDevice(src)
+        if (deviceId) constraints.deviceId = { exact: deviceId }
+        // ask for the smallest capture buffer the device offers (Chromium honours
+        // this hint; TS's lib.dom dropped it, so it goes in untyped)
+        ;(constraints as Record<string, unknown>).latency = { ideal: 0 }
         stream = await navigator.mediaDevices.getUserMedia({ audio: constraints, video: false })
         sourceNode = audio.createMediaStreamSource(stream)
+        latencyMs.value = measureLatency(audio, stream)
         rewire()
         refreshDevices()
-        // never route a live input to the speakers: that is a feedback loop
-        if (monitorGain) monitorGain.gain.value = 0
-        audioOut.setSidetoneMuted(true)
-      } else if (source.value === 'sample') {
-        const preset = SAMPLE_PRESETS.find(p => p.id === sampleId.value) ?? SAMPLE_PRESETS[0]!
-        const buffer = renderSample(audio, customSample ?? preset.options)
-        if (monitorGain) monitorGain.gain.value = settings.value.monitor ? 1 : 0
-        playBuffer(audio, buffer)
+        // A microphone hears the keyer sidetone from the speakers and would
+        // decode it; a cable from the rig cannot, so the sidetone stays.
+        audioOut.setSidetoneMuted(src === 'mic')
       } else {
         if (!loadedFile) throw new Error('Choose an audio file first.')
-        if (monitorGain) monitorGain.gain.value = settings.value.monitor ? 1 : 0
+        latencyMs.value = 0
+        audioOut.setSidetoneMuted(false)
         playBuffer(audio, loadedFile)
       }
+      // headphone passthrough — see monitorTarget for the per-source policy
+      if (monitorGain) monitorGain.gain.setTargetAtTime(monitorTarget(settings.value), audio.currentTime, 0.02)
 
       listening.value = true
       cancelAnimationFrame(rafHandle)
       tick()
       return null
     } catch (err: any) {
-      const msg = err?.name === 'NotAllowedError'
-        ? 'Microphone access was denied. Allow it in the browser’s site settings and try again.'
-        : err?.name === 'NotFoundError'
-          ? 'No audio input device found.'
-          : err?.message ?? 'Could not start the decoder.'
+      const msg = describeCaptureError(err)
       error.value = msg
       listening.value = false
       teardownSource()
@@ -440,38 +613,61 @@ export function useCwStreamDecoder() {
   // ---- raw-input recorder -------------------------------------------------------------
 
   function onRecordBlock(block: Float32Array) {
-    if (!recording.value || !sourceNode) return
+    if (recordingState.value !== 'recording' || !sourceNode) return
     recordChunks.push(toInt16(block))
     recordedBytes.value += block.length * 2
     recordedSeconds.value = recordedBytes.value / 2 / recordSampleRate
-    if (recordedBytes.value >= RECORD_LIMIT_BYTES) stopRecording()
+    // full: hold the take rather than lose it — the operator exports it
+    if (recordedBytes.value >= RECORD_LIMIT_BYTES) pauseRecording()
   }
 
-  /** Start capturing the raw input (pre-filter) while listening. */
+  /** Start a new take, or resume a paused one, while listening. */
   function startRecording(): boolean {
-    if (!ctx || !listening.value || recording.value) return false
-    recordChunks = []
-    recordedBytes.value = 0
-    recordedSeconds.value = 0
-    recordSampleRate = ctx.sampleRate
-    recording.value = true
+    if (!ctx || !listening.value || recordingState.value === 'recording') return false
+    if (recordingState.value === 'idle') {
+      recordChunks = []
+      recordedBytes.value = 0
+      recordedSeconds.value = 0
+      recordSampleRate = ctx.sampleRate
+    } else if (recordedBytes.value >= RECORD_LIMIT_BYTES) {
+      return false
+    }
+    recordingState.value = 'recording'
     return true
   }
 
-  /** Stop capturing; returns the WAV (16-bit mono at the context rate) or null if nothing was captured. */
-  function stopRecording(): { blob: Blob; seconds: number; sampleRate: number } | null {
-    if (!recording.value) return null
-    recording.value = false
-    const chunks = recordChunks
+  /** Hold the take; resume with startRecording, or export / discard it. */
+  function pauseRecording() {
+    if (recordingState.value === 'recording') recordingState.value = 'paused'
+  }
+
+  /** Drop the take entirely. */
+  function discardRecording() {
+    recordingState.value = 'idle'
     recordChunks = []
+    recordedBytes.value = 0
+    recordedSeconds.value = 0
+  }
+
+  /**
+   * End the take and hand back the WAV (16-bit mono at the context rate), or
+   * null if nothing was captured. Works while recording or paused.
+   */
+  function exportRecording(): { blob: Blob; seconds: number; sampleRate: number } | null {
+    if (recordingState.value === 'idle') return null
+    const chunks = recordChunks
+    const rate = recordSampleRate
+    discardRecording()
     const numSamples = chunks.reduce((n, c) => n + c.length, 0)
     if (numSamples === 0) return null
-    const parts: BlobPart[] = [wavHeader16(recordSampleRate, numSamples), ...chunks.map(c => c.buffer as ArrayBuffer)]
-    return { blob: new Blob(parts, { type: 'audio/wav' }), seconds: numSamples / recordSampleRate, sampleRate: recordSampleRate }
+    const parts: BlobPart[] = [wavHeader16(rate, numSamples), ...chunks.map(c => c.buffer as ArrayBuffer)]
+    return { blob: new Blob(parts, { type: 'audio/wav' }), seconds: numSamples / rate, sampleRate: rate }
   }
 
   function stop() {
     decoder?.flush()
+    // the take survives a Stop: nothing is exported or dropped without the operator asking
+    pauseRecording()
     teardownSource()
     cancelAnimationFrame(rafHandle)
     rafHandle = 0
@@ -549,18 +745,19 @@ export function useCwStreamDecoder() {
     return analyser ? analyser.frequencyBinCount : 1024
   }
 
+  /** Filter/threshold defaults; device choices and monitor routing are wiring, not tuning, and stay */
   function resetSettings() {
-    const keepDevice = settings.value.deviceId
-    settings.value = { ...defaultSettings(), deviceId: keepDevice }
+    const { lineDeviceId, micDeviceId, outputDeviceId, monitor, monitorMic, monitorLevel } = settings.value
+    settings.value = { ...defaultSettings(), lineDeviceId, micDeviceId, outputDeviceId, monitor, monitorMic, monitorLevel }
   }
 
   return {
     // state
-    listening, source, text, pattern, error, devices, sampleId, fileName, playbackProgress, meter, elements, settings, report,
-    recording, recordedSeconds, recordedBytes,
+    listening, source, text, pattern, error, devices, outputs, devicesLabelled, suggestedLineDevice, canSelectOutput,
+    fileName, playbackProgress, latencyMs, meter, elements, settings, report,
+    recording, recordingState, recordedSeconds, recordedBytes,
     // actions
-    start, stop, clear, loadFile, refreshDevices, resetTiming, resetSettings, spectrum, spectrumBins,
-    startRecording, stopRecording,
-    presets: SAMPLE_PRESETS
+    start, stop, clear, loadFile, refreshDevices, requestDevicePermission, resetTiming, resetSettings, spectrum, spectrumBins,
+    startRecording, pauseRecording, exportRecording, discardRecording
   }
 }
