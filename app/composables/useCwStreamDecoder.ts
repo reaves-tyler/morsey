@@ -80,6 +80,11 @@ export const DEFAULT_DEVICE = 'default'
 const LINE_LABEL = /line|aux|external|headset|jack|usb|codec|cable|sound ?card|interface/i
 
 const SETTINGS_KEY = 'morsey-decode-v1'
+/** the terminal is a log tail: it survives Stop, level resets and reloads, and only Clear empties it */
+const LOG_KEY = 'morsey-decode-log-v1'
+const LOG_LIMIT = 20000
+/** silence this long starts a new line, so separate transmissions don't run together */
+const IDLE_NEWLINE_MS = 5000
 
 function defaultSettings(): DecodeSettings {
   return {
@@ -217,6 +222,8 @@ let playbackStart = 0
 let playbackDuration = 0
 let settingsLoaded = false
 let watchersAttached = false
+/** decoder-time (ms) of the last key edge, for the idle newline */
+let lastKeyMs = 0
 let loadedFile: AudioBuffer | null = null
 let deviceListenerAttached = false
 
@@ -257,6 +264,10 @@ export function useCwStreamDecoder() {
     onNuxtReady(() => {
       canSelectOutput.value = typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype
       try {
+        const log = localStorage.getItem(LOG_KEY)
+        if (log && !text.value) text.value = log
+      } catch { /* unavailable storage */ }
+      try {
         const raw = localStorage.getItem(SETTINGS_KEY)
         if (raw) {
           const stored = JSON.parse(raw) as Partial<DecodeSettings> & { deviceId?: string }
@@ -277,6 +288,15 @@ export function useCwStreamDecoder() {
     let prevLine = settings.value.lineDeviceId
     let prevMic = settings.value.micDeviceId
     let prevOut = settings.value.outputDeviceId
+    watch(text, (t) => {
+      // keep the tail if the log outgrows the cap
+      if (t.length > LOG_LIMIT) {
+        const cut = t.indexOf('\n', t.length - LOG_LIMIT)
+        text.value = t.slice(cut >= 0 ? cut + 1 : t.length - LOG_LIMIT)
+        return
+      }
+      try { localStorage.setItem(LOG_KEY, t) } catch { /* storage full/unavailable */ }
+    })
     watch(settings, (s) => {
       try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)) } catch { /* storage full/unavailable */ }
       applySettings(s)
@@ -360,8 +380,9 @@ export function useCwStreamDecoder() {
           recentChars.value.push(ch !== '*')
           if (recentChars.value.length > 20) recentChars.value.shift()
         },
-        onWordGap: () => { if (text.value && !text.value.endsWith(' ')) text.value += ' ' },
+        onWordGap: () => { if (text.value && !/[ \n]$/.test(text.value)) text.value += ' ' },
         onPattern: (p) => { pattern.value = p },
+        onKey: (_down, atMs) => { lastKeyMs = atMs },
         onElement: (el, ms) => {
           elements.value.push({ el, ms })
           if (elements.value.length > 40) elements.value.shift()
@@ -505,8 +526,17 @@ export function useCwStreamDecoder() {
     }
   }
 
+  /** end the current line if it has text (the terminal is a log: lines separate transmissions) */
+  function newline() {
+    const t = text.value.replace(/ +$/, '')
+    if (t && !t.endsWith('\n')) text.value = t + '\n'
+  }
+
   function tick() {
-    if (decoder) meter.value = decoder.getState()
+    if (decoder) {
+      meter.value = decoder.getState()
+      if (meter.value.timeMs - lastKeyMs >= IDLE_NEWLINE_MS) newline()
+    }
     if (playbackDuration > 0 && ctx) {
       playbackProgress.value = Math.min(1, (ctx.currentTime - playbackStart) / playbackDuration)
     }
@@ -557,11 +587,12 @@ export function useCwStreamDecoder() {
       if (audio.state === 'suspended') await audio.resume()
       teardownSource()
       decoder?.reset()
+      lastKeyMs = 0
       pattern.value = ''
       elements.value = []
       recentChars.value = []
-      // the terminal keeps its copy across restarts; separate the sessions
-      if (text.value && !text.value.endsWith(' ')) text.value += ' '
+      // the terminal keeps its log across restarts; a new session starts a new line
+      newline()
 
       const src = source.value
       if (isLive(src)) {
@@ -690,8 +721,20 @@ export function useCwStreamDecoder() {
     }
   }
 
+  /** Re-learn the noise floor and signal peak (after a volume or gain change). Text and timing stay. */
+  function resetLevels() {
+    decoder?.resetLevels()
+    if (decoder) {
+      lastKeyMs = decoder.getState().timeMs
+      meter.value = decoder.getState()
+    }
+    pattern.value = ''
+  }
+
+  /** The only thing that empties the terminal. */
   function clear() {
     text.value = ''
+    try { localStorage.removeItem(LOG_KEY) } catch { /* ok */ }
     pattern.value = ''
     elements.value = []
     recentChars.value = []
@@ -757,7 +800,7 @@ export function useCwStreamDecoder() {
     fileName, playbackProgress, latencyMs, meter, elements, settings, report,
     recording, recordingState, recordedSeconds, recordedBytes,
     // actions
-    start, stop, clear, loadFile, refreshDevices, requestDevicePermission, resetTiming, resetSettings, spectrum, spectrumBins,
+    start, stop, clear, loadFile, refreshDevices, requestDevicePermission, resetTiming, resetLevels, resetSettings, spectrum, spectrumBins,
     startRecording, pauseRecording, exportRecording, discardRecording
   }
 }

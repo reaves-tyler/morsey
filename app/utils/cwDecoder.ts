@@ -311,6 +311,23 @@ export class CwDecoder {
   private rawState = false
   /** time the envelope first fell below the on-level during a mark (symmetric edge timing) */
   private fallSinceMs = -1
+  /**
+   * Stuck-gate recovery. Levels learned on a toggling signal (listening or a
+   * level reset started mid-transmission) put the floor between noise and
+   * tone with an inflated deviation, and the CFAR gate then never opens while
+   * the tone keeps being averaged into the floor. Once a second the last
+   * second of magnitudes is examined: if it is clearly bimodal (clusters
+   * ≥ 10 dB apart), the signal cluster holds 20–80 % of the samples and the
+   * runs above the split last tens of milliseconds like keyed elements — a
+   * toggling transmission, not band noise (whose log-magnitude also splits,
+   * but in ~10 ms flickers) or a sparse static crash — at least as strong as
+   * the remembered peak, while almost nothing keyed, the gate is stuck and
+   * the trackers are re-seeded from the clusters.
+   */
+  private keyedTicks = 0
+  private recentMag = new Float32Array(512)
+  private recentPos = 0
+  private recentFilled = 0
   private candidateState = false
   private candidateSinceMs = 0
   private keyed = false
@@ -431,6 +448,9 @@ export class CwDecoder {
     this.levelsInit = false
     this.warmupUntilMs = 0
     this.outliers = 0
+    this.keyedTicks = 0
+    this.recentFilled = 0
+    this.recentPos = 0
     this.spacingCalibrated = false
     this.rawState = false
     this.fallSinceMs = -1
@@ -443,6 +463,35 @@ export class CwDecoder {
     this.charFlushed = true
     this.wordFlushed = true
     this.hasOutput = false
+  }
+
+  /**
+   * Re-learn the noise floor, signal peak and deviation from scratch (with a
+   * fresh warm-up), e.g. after the operator changed the rig's volume or the
+   * interface gain. Timing clusters and decoded output are untouched; a
+   * character in progress is flushed rather than mixed with the new levels.
+   */
+  resetLevels() {
+    if (this.pattern) this.flushChar()
+    this.magnitude = 0
+    this.floor = 0
+    this.devSq = 0
+    this.peak = 0
+    this.threshold = 0
+    this.levelsInit = false
+    this.warmupUntilMs = 0
+    this.outliers = 0
+    this.keyedTicks = 0
+    this.recentFilled = 0
+    this.recentPos = 0
+    this.rawState = false
+    this.fallSinceMs = -1
+    this.candidateState = false
+    this.keyed = false
+    this.hasEdge = false
+    this.currentMarks = []
+    this.charFlushed = true
+    this.wordFlushed = true
   }
 
   /** Feed PCM (mono, -1..1). Any block length is fine. */
@@ -489,6 +538,17 @@ export class CwDecoder {
         // warm-up even when the stream began with digital silence
         this.floor += d * this.aFloorWarm
         this.devSq += (d * d - this.devSq) * this.aFloorWarm
+      } else if (d < 0) {
+        // Only upward excursions can be signal; anything below the floor is
+        // noise by definition and always pulls it down. A drop far outside the
+        // tracked deviation means the floor was learned on a tone (listening
+        // or a level reset started mid-mark, the gain turned down): step down
+        // at the warm-up rate and leave the deviation alone, so the returning
+        // tone is rejected as signal instead of averaged in. Real band noise
+        // never trips this — its magnitude is Rayleigh, dips stay within 3σ.
+        const outlier = d * d > this.devSq * 9
+        this.floor += d * (outlier ? this.aFloorWarm : this.aFloor)
+        if (!outlier) this.devSq += (d * d - this.devSq) * this.aFloor
       } else if (d * d <= this.devSq * 9) {
         this.floor += d * this.aFloor
         this.devSq += (d * d - this.devSq) * this.aFloor
@@ -498,6 +558,10 @@ export class CwDecoder {
       this.peak += (mag - this.peak) * (mag > this.peak ? this.aPeakUp : this.aPeakDown)
     }
     if (this.peak < this.floor) this.peak = this.floor
+    this.recentMag[this.recentPos] = mag
+    this.recentPos = (this.recentPos + 1) % this.recentMag.length
+    if (this.recentFilled < this.recentMag.length) this.recentFilled++
+    if (this.keyed) this.keyedTicks++
 
     // --- decision with hysteresis ---
     let onLevel: number
@@ -550,6 +614,14 @@ export class CwDecoder {
       this.setKeyed(this.candidateState, this.candidateSinceMs)
     }
 
+    // --- stuck-gate recovery, once per buffer turn (see field comment) ---
+    if (this.recentPos === 0 && this.recentFilled === this.recentMag.length) {
+      if (!warmingUp && this.cfg.thresholdMode === 'auto' && this.keyedTicks < this.recentMag.length * 0.05) {
+        this.relearnLevels()
+      }
+      this.keyedTicks = 0
+    }
+
     // --- real-time flushing during silence ---
     if (!this.keyed && this.hasEdge) {
       const silence = nowMs - this.lastEdgeMs
@@ -559,6 +631,57 @@ export class CwDecoder {
         this.ev.onWordGap?.()
       }
     }
+  }
+
+  /**
+   * Re-seed floor / deviation / peak from the last second of magnitudes by
+   * splitting them into a noise and a signal cluster (log-domain 2-means, at
+   * least 10 dB apart, signal cluster 20–80 % of the samples). Anything else
+   * — unimodal noise, a sparse crash, a steady carrier — is left alone.
+   */
+  private relearnLevels() {
+    const n = this.recentFilled
+    if (n < 64) return
+    // chronological order (the ring's oldest sample is at recentPos)
+    const values: number[] = []
+    for (let i = 0; i < n; i++) values.push(Math.max(this.recentMag[(this.recentPos + i) % n]!, 1e-6))
+    const split = splitClusters(values, 3.16)
+    if (!split) return
+    const cut = Math.sqrt(split.low * split.high)
+    // keyed elements are runs of tens of ms above the cut; noise flickers in ~10 ms bursts
+    let runs = 0
+    let runTicks = 0
+    let above = false
+    for (const v of values) {
+      const hi = v >= cut
+      if (hi && !above) runs++
+      if (hi) runTicks++
+      above = hi
+    }
+    const minRunTicks = Math.max(8, Math.round(30 / ((this.hop / this.cfg.sampleRate) * 1000)))
+    if (runs < 3 || runTicks / runs < minRunTicks) return
+    let lowSum = 0
+    let lowN = 0
+    let highSum = 0
+    let highN = 0
+    for (const v of values) {
+      if (v < cut) { lowSum += v; lowN++ } else { highSum += v; highN++ }
+    }
+    if (!lowN || !highN) return
+    const highFrac = highN / n
+    if (highFrac < 0.2 || highFrac > 0.8) return
+    // A signal we already track (the remembered peak) well above the "signal"
+    // cluster means the window is bursty noise in a gap, not a stuck gate:
+    // the K5's static splits 30 dB wide and would otherwise erase the peak.
+    const highMean = highSum / highN
+    if (highMean < this.peak * 0.8) return
+    const floor = lowSum / lowN
+    let varSum = 0
+    for (const v of values) if (v < cut) varSum += (v - floor) * (v - floor)
+    this.floor = floor
+    // never below a Rayleigh-plausible spread, so the CFAR gate stays meaningful
+    this.devSq = Math.max(varSum / lowN, (0.3 * floor) * (0.3 * floor))
+    this.peak = highMean
   }
 
   private setKeyed(down: boolean, atMs: number) {

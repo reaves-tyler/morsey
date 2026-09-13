@@ -321,6 +321,47 @@ describe('configuration', () => {
     expect(text.trim()).toBe('RETUNE OK')
   })
 
+  it('resetLevels re-learns the floor and peak after a gain change without touching timing', () => {
+    // a strong signal, then the same sender 26 dB quieter (the operator turned the interface down)
+    const loud = renderCw({ sampleRate: FS, text: 'PARIS PARIS', wpm: 20 }).samples
+    const quiet = renderCw({ sampleRate: FS, text: 'CODEX CODEX', wpm: 20, seed: 7 }).samples.map(v => v * 0.05)
+    let text = ''
+    const decoder = new CwDecoder({ sampleRate: FS }, { onCharacter: ch => { text += ch }, onWordGap: () => { text += ' ' } })
+    for (let i = 0; i < loud.length; i += 512) decoder.process(loud.subarray(i, i + 512))
+    const before = decoder.getState()
+    decoder.resetLevels()
+    const reset = decoder.getState()
+    expect(reset.peak).toBe(0)
+    expect(reset.ditMs).toBeCloseTo(before.ditMs, 5) // timing survives
+    for (let i = 0; i < quiet.length; i += 512) decoder.process(quiet.subarray(i, i + 512))
+    decoder.flush()
+    const after = decoder.getState()
+    expect(text.trim()).toBe('PARIS PARIS CODEX CODEX')
+    expect(after.peak).toBeLessThan(before.peak * 0.1) // the peak tracker now describes the quiet signal
+    expect(after.peak).toBeGreaterThan(0.01)
+  })
+
+  it('recovers when the levels are learned on a tone (listening started mid-mark)', () => {
+    // a second of steady carrier first, so the warm-up takes the tone for the noise floor
+    const carrier = new Float32Array(FS)
+    for (let i = 0; i < carrier.length; i++) carrier[i] = 0.5 * Math.sin((2 * Math.PI * 700 * i) / FS)
+    const rest = renderCw({ sampleRate: FS, text: 'PARIS PARIS', wpm: 20 }).samples
+    const all = new Float32Array(carrier.length + rest.length)
+    all.set(carrier)
+    all.set(rest, carrier.length)
+    const { text } = decodeAudio(all)
+    expect(text.endsWith('PARIS PARIS'), `"${text}"`).toBe(true)
+  })
+
+  it('recovers when listening starts in the middle of a transmission', () => {
+    // skip the leading silence and half of the first character: the warm-up learns a toggling signal
+    const { samples } = renderCw({ sampleRate: FS, text: 'PARIS PARIS CODEX CODEX', wpm: 20 })
+    let first = samples.findIndex(v => Math.abs(v) > 0.1)
+    first += Math.round(0.04 * FS) // 40 ms into the first dit
+    const { text } = decodeAudio(samples.subarray(first))
+    expect(text.endsWith('CODEX CODEX'), `"${text}"`).toBe(true)
+  })
+
   it('reset clears pending state', () => {
     const { samples } = renderCw({ sampleRate: FS, text: 'E', wpm: 20, tailSec: 0 })
     let chars = 0

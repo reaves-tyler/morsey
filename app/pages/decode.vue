@@ -341,7 +341,7 @@ async function copyText() {
 }
 
 /** Render decoded text with prosigns as chips and unknowns dimmed */
-const tokens = computed(() => dec.text.value.match(/<[A-Z]+>|\*| |[^<* ]+/g) ?? [])
+const tokens = computed(() => dec.text.value.match(/<[A-Z]+>|\*| |\n|[^<* \n]+/g) ?? [])
 
 // ---- Advanced ------------------------------------------------------------------------
 
@@ -361,7 +361,7 @@ function matchRigPitch() {
       <div>
         <h1 class="text-2xl font-semibold tracking-tight">Stream decoding</h1>
         <p class="mt-1 text-sm text-zinc-400">
-          Live over-the-air CW terminal. Cable the rig into your laptop's aux jack or a USB sound card, or hold a microphone to its speaker — the audio is passed through to your headphones while it decodes.
+          Live over-the-air CW terminal. Cable the rig into your laptop's aux jack or a USB sound card, or hold a microphone to its speaker — the audio is passed through to your headphones while it decodes. The text is a running log: it survives Stop and reloads, breaks the line after five seconds of silence, and only Clear empties it.
         </p>
       </div>
       <div class="flex items-center gap-2">
@@ -415,7 +415,21 @@ function matchRigPitch() {
           <!-- Level meter with the decoder's marks -->
           <div>
             <div class="mb-1 flex items-center justify-between font-mono text-[10px] uppercase tracking-widest text-zinc-500">
-              <span>Tone level in passband</span>
+              <span class="flex items-center gap-2">
+                Tone level in passband
+                <UButton
+                  size="xs"
+                  variant="soft"
+                  color="neutral"
+                  icon="i-lucide-rotate-ccw"
+                  :disabled="!dec.listening.value"
+                  class="normal-case tracking-normal"
+                  title="Re-learn the noise floor and signal peak — press after changing the rig's volume or the interface gain. Text and speed tracking are kept."
+                  @click="dec.resetLevels()"
+                >
+                  Reset levels
+                </UButton>
+              </span>
               <span class="flex gap-3 normal-case tracking-normal">
                 <span class="text-zinc-500">▮ floor</span>
                 <span class="text-amber-400">▮ threshold</span>
