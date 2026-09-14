@@ -1,4 +1,7 @@
 <script setup lang="ts">
+// full-width shell: the stream on the left half and its controls on the right want the whole screen
+definePageMeta({ wide: true })
+
 useSeoMeta({
   title: 'Live CW Decoder for Your Transceiver Audio',
   description: 'Decode Morse code from your radio in real time, in the browser. Feed the rig into a laptop\'s aux jack, a USB sound card or a microphone, hear it in your headphones, tune the passband on a live spectrum display, and read a text terminal with automatic speed tracking, adaptive noise threshold and prosign detection.',
@@ -124,6 +127,11 @@ const monitorOn = computed({
 const monitorDb = computed(() => {
   const g = s.value.monitorLevel
   return g <= 0 ? '−∞' : `${g >= 1 ? '+' : ''}${(20 * Math.log10(g)).toFixed(0)}`
+})
+/** what the leveller is doing right now, signed dB */
+const agcDb = computed(() => {
+  const d = Math.round(dec.monitorGainDb.value)
+  return `${d > 0 ? '+' : ''}${d}`
 })
 
 const detecting = ref(false)
@@ -340,8 +348,14 @@ async function copyText() {
   } catch { /* clipboard unavailable */ }
 }
 
-/** Render decoded text with prosigns as chips and unknowns dimmed */
-const tokens = computed(() => dec.text.value.match(/<[A-Z]+>|\*| |\n|[^<* \n]+/g) ?? [])
+/** the highlight legend under the terminal (colours match CwHighlightedText) */
+const LEGEND = [
+  { label: 'Callsign', cls: 'text-amber-300' },
+  { label: 'Abbreviation', cls: 'text-emerald-400' },
+  { label: 'Q-signal', cls: 'text-cyan-300' },
+  { label: 'RST', cls: 'text-sky-300' },
+  { label: 'Prosign', cls: 'text-violet-300' }
+]
 
 // ---- Advanced ------------------------------------------------------------------------
 
@@ -360,8 +374,8 @@ function matchRigPitch() {
     <section class="flex flex-wrap items-end justify-between gap-4">
       <div>
         <h1 class="text-2xl font-semibold tracking-tight">Stream decoding</h1>
-        <p class="mt-1 text-sm text-zinc-400">
-          Live over-the-air CW terminal. Cable the rig into your laptop's aux jack or a USB sound card, or hold a microphone to its speaker — the audio is passed through to your headphones while it decodes. The text is a running log: it survives Stop and reloads, breaks the line after five seconds of silence, and only Clear empties it.
+        <p class="mt-1 max-w-4xl text-sm text-zinc-400">
+          Live over-the-air CW terminal. Cable the rig into your laptop's aux jack or a USB sound card, or hold a microphone to its speaker — the audio is passed through to your headphones while it decodes. The text is a running log: it survives Stop and reloads, breaks the line after five seconds of silence, and only Clear empties it. Callsigns, Q-signals, RST reports, prosigns and common shorthand are coloured as they arrive; hover one for its meaning.
         </p>
       </div>
       <div class="flex items-center gap-2">
@@ -384,447 +398,474 @@ function matchRigPitch() {
       </div>
     </section>
 
-    <!-- Signal display -->
-    <UCard>
-      <div class="grid gap-4 lg:grid-cols-[1fr_auto]">
-        <div class="space-y-3">
-          <div class="flex items-center justify-between">
-            <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">
-              Spectrum · click or drag to tune
-            </div>
-            <div class="flex gap-1.5">
-              <UButton size="xs" variant="soft" color="neutral" icon="i-lucide-crosshair" :disabled="!dec.listening.value" @click="tuneToPeak">
-                Tune to peak
-              </UButton>
-              <UButton size="xs" variant="soft" color="neutral" icon="i-lucide-music-2" @click="matchRigPitch">
-                Rig pitch {{ progress.settings.freq }} Hz
-              </UButton>
-            </div>
-          </div>
-          <canvas
-            ref="spectrumCanvas"
-            class="h-36 w-full cursor-crosshair touch-none rounded-md border border-zinc-800 bg-zinc-950"
-            role="img"
-            :aria-label="`Audio spectrum 200 to 1600 Hz, passband centred at ${s.centerHz} Hz, ${s.bandwidthHz} Hz wide`"
-            @pointerdown="onSpectrumDown"
-            @pointermove="onSpectrumMove"
-            @pointerup="onSpectrumUp"
-            @pointercancel="onSpectrumUp"
-          />
-
-          <!-- Level meter with the decoder's marks -->
-          <div>
-            <div class="mb-1 flex items-center justify-between font-mono text-[10px] uppercase tracking-widest text-zinc-500">
-              <span class="flex items-center gap-2">
-                Tone level in passband
-                <UButton
-                  size="xs"
-                  variant="soft"
-                  color="neutral"
-                  icon="i-lucide-rotate-ccw"
-                  :disabled="!dec.listening.value"
-                  class="normal-case tracking-normal"
-                  title="Re-learn the noise floor and signal peak — press after changing the rig's volume or the interface gain. Text and speed tracking are kept."
-                  @click="dec.resetLevels()"
-                >
-                  Reset levels
-                </UButton>
-              </span>
-              <span class="flex gap-3 normal-case tracking-normal">
-                <span class="text-zinc-500">▮ floor</span>
-                <span class="text-amber-400">▮ threshold</span>
-                <span class="text-emerald-400">▮ peak</span>
-              </span>
-            </div>
-            <div class="relative h-5 overflow-hidden rounded border border-zinc-800 bg-zinc-950">
-              <div
-                class="absolute inset-y-0 left-0 transition-[width] duration-75"
-                :class="m.keyed ? 'bg-emerald-500/70' : 'bg-zinc-600/60'"
-                :style="{ width: pct(m.magnitude) + '%' }"
+    <!-- Two halves on wide screens: the stream on the left, everything that configures it on the right -->
+    <div class="grid items-start gap-6 lg:grid-cols-2">
+      <div class="space-y-6">
+        <!-- Signal display -->
+        <UCard>
+          <!-- readouts sit beside the spectrum only where the half-width column is wide enough -->
+          <div class="grid gap-4 2xl:grid-cols-[1fr_auto]">
+            <div class="space-y-3">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+                  Spectrum · click or drag to tune
+                </div>
+                <div class="flex gap-1.5">
+                  <UButton size="xs" variant="soft" color="neutral" icon="i-lucide-crosshair" class="whitespace-nowrap" :disabled="!dec.listening.value" @click="tuneToPeak">
+                    Tune to peak
+                  </UButton>
+                  <UButton size="xs" variant="soft" color="neutral" icon="i-lucide-music-2" class="whitespace-nowrap" @click="matchRigPitch">
+                    Rig pitch {{ progress.settings.freq }} Hz
+                  </UButton>
+                </div>
+              </div>
+              <canvas
+                ref="spectrumCanvas"
+                class="h-36 w-full cursor-crosshair touch-none rounded-md border border-zinc-800 bg-zinc-950"
+                role="img"
+                :aria-label="`Audio spectrum 200 to 1600 Hz, passband centred at ${s.centerHz} Hz, ${s.bandwidthHz} Hz wide`"
+                @pointerdown="onSpectrumDown"
+                @pointermove="onSpectrumMove"
+                @pointerup="onSpectrumUp"
+                @pointercancel="onSpectrumUp"
               />
-              <div class="absolute inset-y-0 w-0.5 bg-zinc-400" :style="{ left: pct(m.floor) + '%' }" />
-              <div class="absolute inset-y-0 w-0.5 bg-amber-400" :style="{ left: pct(m.threshold) + '%' }" />
-              <div class="absolute inset-y-0 w-0.5 bg-emerald-400" :style="{ left: pct(m.peak) + '%' }" />
-              <div class="pointer-events-none absolute inset-0 flex items-center justify-between px-2 font-mono text-[9px] text-zinc-600">
-                <span>-60 dB</span><span>-40</span><span>-20</span><span>0</span>
+
+              <!-- Level meter with the decoder's marks -->
+              <div>
+                <div class="mb-1 flex items-center justify-between font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+                  <span class="flex items-center gap-2">
+                    Tone level in passband
+                    <UButton
+                      size="xs"
+                      variant="soft"
+                      color="neutral"
+                      icon="i-lucide-rotate-ccw"
+                      :disabled="!dec.listening.value"
+                      class="whitespace-nowrap normal-case tracking-normal"
+                      title="Re-learn the noise floor and signal peak — press after changing the rig's volume or the interface gain. Text and speed tracking are kept."
+                      @click="dec.resetLevels()"
+                    >
+                      Reset levels
+                    </UButton>
+                  </span>
+                  <span class="flex gap-3 normal-case tracking-normal">
+                    <span class="text-zinc-500">▮ floor</span>
+                    <span class="text-amber-400">▮ threshold</span>
+                    <span class="text-emerald-400">▮ peak</span>
+                  </span>
+                </div>
+                <div class="relative h-5 overflow-hidden rounded border border-zinc-800 bg-zinc-950">
+                  <div
+                    class="absolute inset-y-0 left-0 transition-[width] duration-75"
+                    :class="m.keyed ? 'bg-emerald-500/70' : 'bg-zinc-600/60'"
+                    :style="{ width: pct(m.magnitude) + '%' }"
+                  />
+                  <div class="absolute inset-y-0 w-0.5 bg-zinc-400" :style="{ left: pct(m.floor) + '%' }" />
+                  <div class="absolute inset-y-0 w-0.5 bg-amber-400" :style="{ left: pct(m.threshold) + '%' }" />
+                  <div class="absolute inset-y-0 w-0.5 bg-emerald-400" :style="{ left: pct(m.peak) + '%' }" />
+                  <div class="pointer-events-none absolute inset-0 flex items-center justify-between px-2 font-mono text-[9px] text-zinc-600">
+                    <span>-60 dB</span><span>-40</span><span>-20</span><span>0</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Readouts -->
+            <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 2xl:w-56 2xl:grid-cols-1">
+              <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2">
+                <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Speed</div>
+                <div class="text-2xl font-semibold text-emerald-400">
+                  {{ wpmText }} <span class="text-xs font-normal text-zinc-500">WPM</span>
+                </div>
+                <div class="font-mono text-[11px] text-zinc-500">
+                  dit {{ Math.round(m.ditMs) }} ms · dah {{ Math.round(m.dahMs) }} ms · {{ ratio }}:1
+                  <span v-if="!m.calibrated && dec.listening.value" class="text-amber-400"> · seeding</span>
+                </div>
+              </div>
+              <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2" title="Readability from decode quality (unknown patterns, timing confidence) and S/N · Strength from signal-over-noise (6 dB per S-unit, noise ≈ S3) · Tone assumed 9">
+                <div class="flex items-center justify-between font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+                  <span>Signal report</span>
+                  <span>{{ snrText }} S/N</span>
+                </div>
+                <div class="flex items-baseline gap-2">
+                  <span class="text-2xl font-semibold" :class="report.r >= 4 ? 'text-emerald-400' : report.r >= 3 ? 'text-amber-400' : 'text-zinc-400'">
+                    RST {{ report.rst }}
+                  </span>
+                  <span class="font-mono text-xs text-zinc-400">{{ strengthText }}</span>
+                </div>
+                <!-- S-meter -->
+                <div class="mt-1.5 flex gap-0.5">
+                  <span
+                    v-for="(seg, i) in S_SEGMENTS"
+                    :key="seg"
+                    class="h-2.5 flex-1 rounded-sm transition-colors duration-100"
+                    :class="i < litSegments
+                      ? (i < 9 ? 'bg-emerald-400 shadow-[0_0_6px_theme(colors.emerald.400/60%)]' : 'bg-rose-400 shadow-[0_0_6px_theme(colors.rose.400/60%)]')
+                      : 'bg-zinc-800'"
+                  />
+                </div>
+                <div class="mt-0.5 flex justify-between font-mono text-[9px] text-zinc-600">
+                  <span>S1</span><span>S3</span><span>S5</span><span>S7</span><span>S9</span><span>+10</span><span>+20</span><span>+30</span>
+                </div>
+                <div class="mt-1 font-mono text-[11px] text-zinc-500">
+                  copy {{ Math.round(report.copyQuality * 100) }}% · timing {{ Math.round(report.confidence * 100) }}% · gaps {{ Math.round(m.letterGapMs) }}/{{ Math.round(m.wordGapMs) }} ms
+                </div>
+              </div>
+              <!-- element ribbon: the last few dits/dahs as bars -->
+              <div class="col-span-2 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2 lg:col-span-1">
+                <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Elements</div>
+                <div class="mt-1.5 flex h-4 items-center gap-0.5 overflow-hidden">
+                  <span
+                    v-for="(e, i) in dec.elements.value.slice(-24)"
+                    :key="i"
+                    class="h-2.5 shrink-0 rounded-sm bg-emerald-400/80"
+                    :style="{ width: e.el === '-' ? '14px' : '5px' }"
+                    :title="`${e.el} ${Math.round(e.ms)} ms`"
+                  />
+                  <span v-if="dec.elements.value.length === 0" class="font-mono text-[11px] text-zinc-600">—</span>
+                </div>
               </div>
             </div>
           </div>
-        </div>
+        </UCard>
 
-        <!-- Readouts -->
-        <div class="grid grid-cols-2 gap-2 lg:w-56 lg:grid-cols-1">
-          <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2">
-            <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Speed</div>
-            <div class="text-2xl font-semibold text-emerald-400">
-              {{ wpmText }} <span class="text-xs font-normal text-zinc-500">WPM</span>
-            </div>
-            <div class="font-mono text-[11px] text-zinc-500">
-              dit {{ Math.round(m.ditMs) }} ms · dah {{ Math.round(m.dahMs) }} ms · {{ ratio }}:1
-              <span v-if="!m.calibrated && dec.listening.value" class="text-amber-400"> · seeding</span>
+        <!-- Terminal -->
+        <UCard>
+          <div class="mb-2 flex items-center justify-between">
+            <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Decoded text</div>
+            <div class="flex gap-1.5">
+              <UButton size="xs" variant="soft" color="neutral" :icon="copied ? 'i-lucide-check' : 'i-lucide-copy'" :disabled="!dec.text.value" @click="copyText">
+                {{ copied ? 'Copied' : 'Copy' }}
+              </UButton>
+              <UButton size="xs" variant="soft" color="neutral" icon="i-lucide-eraser" :disabled="!dec.text.value && !dec.pattern.value" @click="dec.clear()">
+                Clear
+              </UButton>
             </div>
           </div>
-          <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2" title="Readability from decode quality (unknown patterns, timing confidence) and S/N · Strength from signal-over-noise (6 dB per S-unit, noise ≈ S3) · Tone assumed 9">
-            <div class="flex items-center justify-between font-mono text-[10px] uppercase tracking-widest text-zinc-500">
-              <span>Signal report</span>
-              <span>{{ snrText }} S/N</span>
-            </div>
-            <div class="flex items-baseline gap-2">
-              <span class="text-2xl font-semibold" :class="report.r >= 4 ? 'text-emerald-400' : report.r >= 3 ? 'text-amber-400' : 'text-zinc-400'">
-                RST {{ report.rst }}
-              </span>
-              <span class="font-mono text-xs text-zinc-400">{{ strengthText }}</span>
-            </div>
-            <!-- S-meter -->
-            <div class="mt-1.5 flex gap-0.5">
-              <span
-                v-for="(seg, i) in S_SEGMENTS"
-                :key="seg"
-                class="h-2.5 flex-1 rounded-sm transition-colors duration-100"
-                :class="i < litSegments
-                  ? (i < 9 ? 'bg-emerald-400 shadow-[0_0_6px_theme(colors.emerald.400/60%)]' : 'bg-rose-400 shadow-[0_0_6px_theme(colors.rose.400/60%)]')
-                  : 'bg-zinc-800'"
-              />
-            </div>
-            <div class="mt-0.5 flex justify-between font-mono text-[9px] text-zinc-600">
-              <span>S1</span><span>S3</span><span>S5</span><span>S7</span><span>S9</span><span>+10</span><span>+20</span><span>+30</span>
-            </div>
-            <div class="mt-1 font-mono text-[11px] text-zinc-500">
-              copy {{ Math.round(report.copyQuality * 100) }}% · timing {{ Math.round(report.confidence * 100) }}% · gaps {{ Math.round(m.letterGapMs) }}/{{ Math.round(m.wordGapMs) }} ms
-            </div>
-          </div>
-          <!-- element ribbon: the last few dits/dahs as bars -->
-          <div class="col-span-2 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2 lg:col-span-1">
-            <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Elements</div>
-            <div class="mt-1.5 flex h-4 items-center gap-0.5 overflow-hidden">
-              <span
-                v-for="(e, i) in dec.elements.value.slice(-24)"
-                :key="i"
-                class="h-2.5 shrink-0 rounded-sm bg-emerald-400/80"
-                :style="{ width: e.el === '-' ? '14px' : '5px' }"
-                :title="`${e.el} ${Math.round(e.ms)} ms`"
-              />
-              <span v-if="dec.elements.value.length === 0" class="font-mono text-[11px] text-zinc-600">—</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </UCard>
-
-    <!-- Terminal -->
-    <UCard>
-      <div class="mb-2 flex items-center justify-between">
-        <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Decoded text</div>
-        <div class="flex gap-1.5">
-          <UButton size="xs" variant="soft" color="neutral" :icon="copied ? 'i-lucide-check' : 'i-lucide-copy'" :disabled="!dec.text.value" @click="copyText">
-            {{ copied ? 'Copied' : 'Copy' }}
-          </UButton>
-          <UButton size="xs" variant="soft" color="neutral" icon="i-lucide-eraser" :disabled="!dec.text.value && !dec.pattern.value" @click="dec.clear()">
-            Clear
-          </UButton>
-        </div>
-      </div>
-      <div
-        ref="terminal"
-        class="h-48 overflow-y-auto rounded-md border border-zinc-800 bg-zinc-950 p-4 font-mono text-lg leading-relaxed text-emerald-200 whitespace-pre-wrap break-words"
-        aria-live="polite"
-      >
-        <template v-for="(tok, i) in tokens" :key="i">
-          <span v-if="tok.startsWith('<')" class="mx-0.5 rounded bg-emerald-500/15 px-1 text-sm text-emerald-300">{{ tok.slice(1, -1) }}</span>
-          <span v-else-if="tok === '*'" class="text-zinc-600" title="unknown pattern">·</span>
-          <span v-else>{{ tok }}</span>
-        </template>
-        <span v-if="dec.pattern.value" class="ml-1 rounded bg-zinc-800 px-1.5 text-sm text-amber-300">{{ dec.pattern.value }}</span>
-        <span
-          class="ml-0.5 inline-block h-5 w-2 translate-y-1 bg-emerald-400/80"
-          :class="dec.listening.value ? 'animate-pulse' : 'opacity-30'"
-        />
-        <p v-if="!dec.text.value && !dec.listening.value" class="text-sm text-zinc-600">
-          Nothing decoded yet. Pick an input below and press Start listening.
-        </p>
-      </div>
-      <div v-if="dec.playbackProgress.value > 0 && dec.listening.value" class="mt-2">
-        <UProgress :model-value="dec.playbackProgress.value * 100" :max="100" size="xs" />
-      </div>
-    </UCard>
-
-    <!-- Controls -->
-    <div class="grid gap-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]">
-      <UCard>
-        <div class="mb-3 font-mono text-[10px] uppercase tracking-widest text-zinc-500">Source</div>
-        <div class="grid grid-cols-3 gap-1.5">
-          <button
-            v-for="src in SOURCES"
-            :key="src.id"
-            class="flex flex-col items-center gap-1 rounded border px-2 py-2.5 text-center transition"
-            :class="dec.source.value === src.id
-              ? 'border-emerald-500 bg-emerald-500/15 text-emerald-300 shadow-[0_0_10px_-2px_theme(colors.emerald.500/60%)]'
-              : 'border-zinc-700 bg-zinc-800/60 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200'"
-            @click="selectSource(src.id)"
+          <div
+            ref="terminal"
+            class="h-56 overflow-y-auto rounded-md border border-zinc-800 bg-zinc-950 p-4 font-mono text-lg leading-relaxed text-emerald-200 whitespace-pre-wrap break-words lg:h-[26rem]"
+            aria-live="polite"
           >
-            <UIcon :name="src.icon" class="size-5" />
-            <span class="font-mono text-xs uppercase tracking-wider">{{ src.label }}</span>
-            <span class="text-[10px] leading-tight text-zinc-500">{{ src.hint }}</span>
-          </button>
-        </div>
-
-        <!-- per-source options -->
-        <div v-if="isLive(dec.source.value)" class="mt-4 space-y-3">
-          <div class="flex items-center gap-2">
-            <USelect
-              v-model="inputDevice"
-              :items="inputItems"
-              value-key="value"
-              size="sm"
-              class="flex-1"
-              icon="i-lucide-audio-lines"
-            />
-            <UButton
-              size="sm"
-              variant="soft"
-              color="neutral"
-              :icon="dec.devicesLabelled.value ? 'i-lucide-refresh-cw' : 'i-lucide-scan-search'"
-              :loading="detecting"
-              :title="dec.devicesLabelled.value ? 'Refresh device list' : 'Detect devices (asks for audio permission once, so the inputs show their names)'"
-              @click="detectDevices"
-            >
-              <span v-if="!dec.devicesLabelled.value">Detect</span>
-            </UButton>
-          </div>
-          <p v-if="dec.source.value === 'line'" class="text-xs leading-snug text-zinc-500">
-            Run a cable from the rig's headphone / speaker jack to the laptop's aux (combo) jack or a USB sound card, and pick that input here — the system default is usually the built-in microphone. Keep the rig's AF gain moderate so the meter sits around −20 dB on a signal, and set the pitch to the rig's CW pitch. Browser AGC, noise suppression and echo cancellation are switched off automatically.
-          </p>
-          <p v-else class="text-xs leading-snug text-zinc-500">
-            Hold the microphone close to the rig's speaker in a quiet room. Wear headphones if you monitor: a mic feeding the speakers is a feedback loop. The keyer sidetone is muted while the microphone is live so it isn't decoded too.
-          </p>
-        </div>
-
-        <div v-else class="mt-4 space-y-3">
-          <div class="flex items-center gap-2">
-            <UButton size="sm" variant="soft" color="neutral" icon="i-lucide-folder-open" @click="fileInput?.click()">
-              Choose file
-            </UButton>
-            <span class="truncate font-mono text-xs text-zinc-400">{{ dec.fileName.value || 'no file loaded' }}</span>
-          </div>
-          <input ref="fileInput" type="file" accept="audio/*" class="hidden" @change="onFile">
-          <p class="text-xs leading-snug text-zinc-500">
-            Any format the browser can decode — including the WAVs the Rec button saves. The synthesized test clips live under <code class="text-zinc-400">/samples/cw/</code> if you want to play them through a sound card into a real input.
-          </p>
-        </div>
-
-        <!-- monitor: input → headphones passthrough -->
-        <div class="mt-4 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2.5">
-          <div class="flex items-center justify-between gap-3">
-            <label class="flex items-center gap-2 text-sm">
-              <USwitch v-model="monitorOn" size="sm" />
-              <span class="flex items-center gap-1.5">
-                <UIcon name="i-lucide-headphones" class="size-4 text-zinc-400" />
-                Monitor in headphones
-              </span>
-            </label>
-            <span class="flex items-center gap-3 font-mono text-xs">
+            <template v-if="dec.text.value || dec.pattern.value">
+              <CwHighlightedText :text="dec.text.value" />
+              <span v-if="dec.pattern.value" class="ml-1 text-sm text-amber-300/80" title="Character in progress">{{ dec.pattern.value }}</span>
               <span
-                v-if="dec.listening.value && dec.latencyMs.value > 0"
-                :class="dec.latencyMs.value > 60 ? 'text-amber-400' : 'text-zinc-400'"
-                title="Browser audio round trip (capture buffer + output buffer). Not adjustable from the page — see the note below."
-              >~{{ dec.latencyMs.value }} ms delay</span>
-              <span :class="monitorOn ? 'text-emerald-400' : 'text-zinc-600'">{{ monitorDb }} dB</span>
+                class="ml-0.5 inline-block h-5 w-2 translate-y-1 bg-emerald-400/80"
+                :class="dec.listening.value ? 'animate-pulse' : 'opacity-30'"
+              />
+            </template>
+            <!-- empty log: the placeholder takes the first line; the cursor appears with the first character -->
+            <span v-else class="text-sm text-zinc-600">
+              {{ dec.listening.value ? 'Listening — nothing decoded yet.' : 'Nothing decoded yet. Pick an input below and press Start listening.' }}
             </span>
           </div>
-          <USlider v-model="s.monitorLevel" :min="0" :max="2" :step="0.05" :disabled="!monitorOn" class="mt-2" />
-          <div v-if="dec.canSelectOutput" class="mt-2 flex items-center gap-2">
-            <USelect
-              v-model="s.outputDeviceId"
-              :items="outputItems"
-              value-key="value"
-              size="sm"
-              class="flex-1"
-              icon="i-lucide-speaker"
-              :disabled="!monitorOn"
-            />
+          <div v-if="dec.playbackProgress.value > 0 && dec.listening.value" class="mt-2">
+            <UProgress :model-value="dec.playbackProgress.value * 100" :max="100" size="xs" />
           </div>
-          <p class="mt-1.5 text-xs leading-snug text-zinc-500">
-            <template v-if="dec.source.value === 'mic'">
-              Off by default for a microphone — turn it on only with headphones plugged in.
-            </template>
-            <template v-else>
-              Plugging into the rig's headphone jack silences its speaker; the input is passed straight through to your headphones so you still hear the band. The rig's volume sets the decoder level, this sets yours.
-              The browser adds a few tens of milliseconds each way, which you will notice when keying. For a zero-delay sidetone, put a Y-splitter on the rig's headphone jack — one leg to the laptop, one to your headphones — and switch this monitor off.
-            </template>
-          </p>
-        </div>
+          <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-wider text-zinc-500">
+            <span v-for="l in LEGEND" :key="l.label" class="flex items-center gap-1">
+              <span class="text-sm leading-none" :class="l.cls">■</span>{{ l.label }}
+            </span>
+            <span class="text-zinc-600">· hover a word for its meaning</span>
+          </div>
+        </UCard>
 
-        <div class="mt-4 flex items-center gap-3">
-          <UButton
-            size="lg"
-            :color="dec.listening.value ? 'error' : 'primary'"
-            :icon="dec.listening.value ? 'i-lucide-square' : 'i-lucide-play'"
-            :loading="busy"
-            class="font-mono uppercase tracking-wider"
-            @click="toggle"
-          >
-            {{ dec.listening.value ? 'Stop' : 'Start listening' }}
-          </UButton>
-          <!-- recorder: Rec → Pause → Resume / Export / Discard -->
-          <div class="flex items-center gap-1.5">
-            <UButton
-              v-if="rec === 'idle'"
-              size="lg"
-              variant="soft"
-              color="neutral"
-              icon="i-lucide-circle"
-              :disabled="!dec.listening.value"
-              class="font-mono uppercase tracking-wider"
-              title="Record the raw input to a WAV take (what the decoder hears, before filtering) — for replaying real on-air audio through the decoder tests"
-              @click="recordOrResume"
+      </div>
+
+      <!-- Controls -->
+      <div class="space-y-6">
+        <UCard>
+          <div class="mb-3 font-mono text-[10px] uppercase tracking-widest text-zinc-500">Source</div>
+          <div class="grid grid-cols-3 gap-1.5">
+            <button
+              v-for="src in SOURCES"
+              :key="src.id"
+              class="flex flex-col items-center gap-1 rounded border px-2 py-2.5 text-center transition"
+              :class="dec.source.value === src.id
+                ? 'border-emerald-500 bg-emerald-500/15 text-emerald-300 shadow-[0_0_10px_-2px_theme(colors.emerald.500/60%)]'
+                : 'border-zinc-700 bg-zinc-800/60 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200'"
+              @click="selectSource(src.id)"
             >
-              Rec
-            </UButton>
-            <UButton
-              v-else-if="rec === 'recording'"
-              size="lg"
-              variant="soft"
-              color="error"
-              icon="i-lucide-pause"
-              class="animate-pulse font-mono uppercase tracking-wider"
-              title="Pause the take"
-              @click="dec.pauseRecording()"
-            >
-              Rec {{ recordLabel }}
-            </UButton>
-            <template v-else>
+              <UIcon :name="src.icon" class="size-5" />
+              <span class="font-mono text-xs uppercase tracking-wider">{{ src.label }}</span>
+              <span class="text-[10px] leading-tight text-zinc-500">{{ src.hint }}</span>
+            </button>
+          </div>
+
+          <!-- per-source options -->
+          <div v-if="isLive(dec.source.value)" class="mt-4 space-y-3">
+            <div class="flex items-center gap-2">
+              <USelect
+                v-model="inputDevice"
+                :items="inputItems"
+                value-key="value"
+                size="sm"
+                class="flex-1"
+                icon="i-lucide-audio-lines"
+              />
               <UButton
-                size="lg"
+                size="sm"
                 variant="soft"
-                color="error"
-                icon="i-lucide-circle"
-                :disabled="!dec.listening.value"
-                class="font-mono uppercase tracking-wider"
-                :title="dec.listening.value ? 'Resume the take' : 'Start listening to resume the take'"
-                @click="recordOrResume"
+                color="neutral"
+                :icon="dec.devicesLabelled.value ? 'i-lucide-refresh-cw' : 'i-lucide-scan-search'"
+                :loading="detecting"
+                :title="dec.devicesLabelled.value ? 'Refresh device list' : 'Detect devices (asks for audio permission once, so the inputs show their names)'"
+                @click="detectDevices"
               >
-                {{ recordLabel }}
+                <span v-if="!dec.devicesLabelled.value">Detect</span>
               </UButton>
-              <UButton size="lg" variant="soft" color="primary" icon="i-lucide-download" class="font-mono uppercase tracking-wider" title="Download the take as WAV and start fresh" @click="exportRecording">
-                Export
-              </UButton>
-              <UButton size="lg" variant="ghost" color="neutral" icon="i-lucide-trash-2" title="Discard the take" @click="discardRecording" />
-            </template>
-          </div>
-          <p v-if="dec.error.value" class="text-xs leading-snug text-rose-400">{{ dec.error.value }}</p>
-          <p v-else-if="recordNote" class="text-xs leading-snug text-zinc-400">{{ recordNote }}</p>
-          <p v-else-if="dec.listening.value && dec.source.value === 'mic'" class="text-xs leading-snug text-zinc-500">
-            Keyer sidetone is muted while the microphone is live.
-          </p>
-        </div>
-      </UCard>
-
-      <UCard>
-        <div class="mb-3 flex items-center justify-between">
-          <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Filter & threshold</div>
-          <UButton size="xs" variant="ghost" color="neutral" icon="i-lucide-undo-2" @click="dec.resetSettings()">Defaults</UButton>
-        </div>
-        <div class="space-y-4">
-          <div>
-            <div class="mb-1 flex items-center justify-between text-sm">
-              <span>Centre pitch</span>
-              <span class="font-mono text-emerald-400">{{ s.centerHz }} Hz</span>
             </div>
-            <USlider v-model="s.centerHz" :min="400" :max="1000" :step="10" />
-          </div>
-          <div>
-            <div class="mb-1 flex items-center justify-between text-sm">
-              <span>Bandwidth <span class="text-zinc-500">(pre-filter Q ≈ {{ prefilterQ }})</span></span>
-              <span class="font-mono text-emerald-400">{{ s.bandwidthHz }} Hz</span>
-            </div>
-            <USlider v-model="s.bandwidthHz" :min="25" :max="400" :step="5" />
-            <p class="mt-1 text-xs leading-snug text-zinc-500">
-              Narrow to reject QRM; widen for fast code or a drifting signal. 100 Hz suits most 15–30 WPM copy.
+            <p v-if="dec.source.value === 'line'" class="text-xs leading-snug text-zinc-500">
+              Run a cable from the rig's headphone / speaker jack to the laptop's aux (combo) jack or a USB sound card, and pick that input here — the system default is usually the built-in microphone. Keep the rig's AF gain moderate so the meter sits around −20 dB on a signal, and set the pitch to the rig's CW pitch. Browser AGC, noise suppression and echo cancellation are switched off automatically.
+            </p>
+            <p v-else class="text-xs leading-snug text-zinc-500">
+              Hold the microphone close to the rig's speaker in a quiet room. Wear headphones if you monitor: a mic feeding the speakers is a feedback loop. The keyer sidetone is muted while the microphone is live so it isn't decoded too.
             </p>
           </div>
 
-          <div class="border-t border-zinc-800 pt-4">
-            <div class="mb-2 flex items-center justify-between text-sm">
-              <span>Threshold</span>
-              <div class="flex rounded border border-zinc-700 p-0.5">
-                <button
-                  v-for="mode in (['auto', 'manual'] as const)"
-                  :key="mode"
-                  class="rounded px-2.5 py-0.5 font-mono text-[11px] uppercase tracking-wider transition"
-                  :class="s.thresholdMode === mode ? 'bg-emerald-500/20 text-emerald-300' : 'text-zinc-500 hover:text-zinc-300'"
-                  @click="s.thresholdMode = mode"
-                >
-                  {{ mode }}
-                </button>
-              </div>
+          <div v-else class="mt-4 space-y-3">
+            <div class="flex items-center gap-2">
+              <UButton size="sm" variant="soft" color="neutral" icon="i-lucide-folder-open" @click="fileInput?.click()">
+                Choose file
+              </UButton>
+              <span class="truncate font-mono text-xs text-zinc-400">{{ dec.fileName.value || 'no file loaded' }}</span>
             </div>
-            <template v-if="s.thresholdMode === 'manual'">
-              <div class="mb-1 flex items-center justify-between text-sm">
-                <span class="text-zinc-400">Key-down level</span>
-                <span class="font-mono text-amber-400">{{ s.manualThresholdDb }} dB</span>
-              </div>
-              <USlider v-model="s.manualThresholdDb" :min="-60" :max="0" :step="1" />
-              <p class="mt-1 text-xs leading-snug text-zinc-500">Set it between the noise (grey mark) and the signal (green mark) on the meter.</p>
-            </template>
-            <template v-else>
-              <div class="mb-1 flex items-center justify-between text-sm">
-                <span class="text-zinc-400">Squelch — minimum signal over noise</span>
-                <span class="font-mono text-amber-400">{{ s.minSnrDb }} dB</span>
-              </div>
-              <USlider v-model="s.minSnrDb" :min="0" :max="20" :step="1" />
-              <p class="mt-1 text-xs leading-snug text-zinc-500">
-                Auto tracks the noise floor and the signal peak and keys halfway between them, with a constant-false-alarm gate against noise bursts. Raise the squelch on a noisy band, lower it for weak signals.
-              </p>
-            </template>
+            <input ref="fileInput" type="file" accept="audio/*" class="hidden" @change="onFile">
+            <p class="text-xs leading-snug text-zinc-500">
+              Any format the browser can decode — including the WAVs the Rec button saves. The synthesized test clips live under <code class="text-zinc-400">/samples/cw/</code> if you want to play them through a sound card into a real input.
+            </p>
           </div>
 
-          <div class="border-t border-zinc-800 pt-3">
-            <button class="flex w-full items-center justify-between text-sm text-zinc-300" @click="showAdvanced = !showAdvanced">
-              <span class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Timing & noise blanker</span>
-              <UIcon :name="showAdvanced ? 'i-lucide-chevron-up' : 'i-lucide-chevron-down'" class="size-4 text-zinc-500" />
-            </button>
-            <div v-if="showAdvanced" class="mt-3 space-y-4">
-              <div>
-                <div class="mb-1 flex items-center justify-between text-sm">
-                  <span>Expected speed <span class="text-zinc-500">(seed)</span></span>
-                  <span class="flex items-center gap-2 font-mono text-emerald-400">
-                    {{ s.initialWpm }} WPM
-                    <UButton size="xs" variant="soft" color="neutral" icon="i-lucide-rotate-ccw" title="Re-seed the speed tracker" @click="reseedSpeed" />
-                  </span>
+          <!-- monitor: input → headphones passthrough -->
+          <div class="mt-4 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2.5">
+            <div class="flex items-center justify-between gap-3">
+              <label class="flex items-center gap-2 text-sm">
+                <USwitch v-model="monitorOn" size="sm" />
+                <span class="flex items-center gap-1.5">
+                  <UIcon name="i-lucide-headphones" class="size-4 text-zinc-400" />
+                  Monitor in headphones
+                </span>
+              </label>
+              <span class="flex items-center gap-3 font-mono text-xs">
+                <span
+                  v-if="dec.listening.value && dec.latencyMs.value > 0"
+                  :class="dec.latencyMs.value > 60 ? 'text-amber-400' : 'text-zinc-400'"
+                  title="Browser audio round trip (capture buffer + output buffer). Not adjustable from the page — see the note below."
+                >~{{ dec.latencyMs.value }} ms delay</span>
+                <span :class="monitorOn ? 'text-emerald-400' : 'text-zinc-600'">{{ monitorDb }} dB</span>
+              </span>
+            </div>
+            <USlider v-model="s.monitorLevel" :min="0" :max="2" :step="0.05" :disabled="!monitorOn" class="mt-2" />
+            <div class="mt-2.5 flex items-center justify-between gap-3">
+              <label class="flex items-center gap-2 text-sm" :class="monitorOn ? '' : 'opacity-50'">
+                <USwitch v-model="s.monitorAgc" size="sm" :disabled="!monitorOn" />
+                <span class="flex items-center gap-1.5">
+                  <UIcon name="i-lucide-audio-lines" class="size-4 text-zinc-400" />
+                  Level the volume
+                </span>
+              </label>
+              <span
+                v-if="s.monitorAgc && monitorOn && dec.listening.value"
+                class="font-mono text-xs text-zinc-400"
+                title="Gain the leveller is applying right now"
+              >AGC {{ agcDb }} dB</span>
+            </div>
+            <div v-if="dec.canSelectOutput" class="mt-2 flex items-center gap-2">
+              <USelect
+                v-model="s.outputDeviceId"
+                :items="outputItems"
+                value-key="value"
+                size="sm"
+                class="flex-1"
+                icon="i-lucide-speaker"
+                :disabled="!monitorOn"
+              />
+            </div>
+            <p class="mt-1.5 text-xs leading-snug text-zinc-500">
+              <template v-if="dec.source.value === 'mic'">
+                Off by default for a microphone — turn it on only with headphones plugged in.
+              </template>
+              <template v-else>
+                Plugging into the rig's headphone jack silences its speaker; the input is passed straight through to your headphones so you still hear the band. The rig's volume sets the decoder level, this sets yours.
+                Levelling evens out the rig's loud sidetone and its quieter receive audio, so you stop turning the volume down to transmit and back up to copy. It holds its gain through the gaps of a transmission and recovers over a few seconds after one ends; switch it off to hear the raw levels.
+                The browser adds a few tens of milliseconds each way, which you will notice when keying. For a zero-delay sidetone, put a Y-splitter on the rig's headphone jack — one leg to the laptop, one to your headphones — and switch this monitor off.
+              </template>
+            </p>
+          </div>
+
+          <div class="mt-4 flex items-center gap-3">
+            <UButton
+              size="lg"
+              :color="dec.listening.value ? 'error' : 'primary'"
+              :icon="dec.listening.value ? 'i-lucide-square' : 'i-lucide-play'"
+              :loading="busy"
+              class="font-mono uppercase tracking-wider"
+              @click="toggle"
+            >
+              {{ dec.listening.value ? 'Stop' : 'Start listening' }}
+            </UButton>
+            <!-- recorder: Rec → Pause → Resume / Export / Discard -->
+            <div class="flex items-center gap-1.5">
+              <UButton
+                v-if="rec === 'idle'"
+                size="lg"
+                variant="soft"
+                color="neutral"
+                icon="i-lucide-circle"
+                :disabled="!dec.listening.value"
+                class="font-mono uppercase tracking-wider"
+                title="Record the raw input to a WAV take (what the decoder hears, before filtering) — for replaying real on-air audio through the decoder tests"
+                @click="recordOrResume"
+              >
+                Rec
+              </UButton>
+              <UButton
+                v-else-if="rec === 'recording'"
+                size="lg"
+                variant="soft"
+                color="error"
+                icon="i-lucide-pause"
+                class="animate-pulse font-mono uppercase tracking-wider"
+                title="Pause the take"
+                @click="dec.pauseRecording()"
+              >
+                Rec {{ recordLabel }}
+              </UButton>
+              <template v-else>
+                <UButton
+                  size="lg"
+                  variant="soft"
+                  color="error"
+                  icon="i-lucide-circle"
+                  :disabled="!dec.listening.value"
+                  class="font-mono uppercase tracking-wider"
+                  :title="dec.listening.value ? 'Resume the take' : 'Start listening to resume the take'"
+                  @click="recordOrResume"
+                >
+                  {{ recordLabel }}
+                </UButton>
+                <UButton size="lg" variant="soft" color="primary" icon="i-lucide-download" class="font-mono uppercase tracking-wider" title="Download the take as WAV and start fresh" @click="exportRecording">
+                  Export
+                </UButton>
+                <UButton size="lg" variant="ghost" color="neutral" icon="i-lucide-trash-2" title="Discard the take" @click="discardRecording" />
+              </template>
+            </div>
+            <p v-if="dec.error.value" class="text-xs leading-snug text-rose-400">{{ dec.error.value }}</p>
+            <p v-else-if="recordNote" class="text-xs leading-snug text-zinc-400">{{ recordNote }}</p>
+            <p v-else-if="dec.listening.value && dec.source.value === 'mic'" class="text-xs leading-snug text-zinc-500">
+              Keyer sidetone is muted while the microphone is live.
+            </p>
+          </div>
+        </UCard>
+
+        <UCard>
+          <div class="mb-3 flex items-center justify-between">
+            <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Filter & threshold</div>
+            <UButton size="xs" variant="ghost" color="neutral" icon="i-lucide-undo-2" @click="dec.resetSettings()">Defaults</UButton>
+          </div>
+          <div class="space-y-4">
+            <div>
+              <div class="mb-1 flex items-center justify-between text-sm">
+                <span>Centre pitch</span>
+                <span class="font-mono text-emerald-400">{{ s.centerHz }} Hz</span>
+              </div>
+              <USlider v-model="s.centerHz" :min="400" :max="1000" :step="10" />
+            </div>
+            <div>
+              <div class="mb-1 flex items-center justify-between text-sm">
+                <span>Bandwidth <span class="text-zinc-500">(pre-filter Q ≈ {{ prefilterQ }})</span></span>
+                <span class="font-mono text-emerald-400">{{ s.bandwidthHz }} Hz</span>
+              </div>
+              <USlider v-model="s.bandwidthHz" :min="25" :max="400" :step="5" />
+              <p class="mt-1 text-xs leading-snug text-zinc-500">
+                Narrow to reject QRM; widen for fast code or a drifting signal. 100 Hz suits most 15–30 WPM copy.
+              </p>
+            </div>
+
+            <div class="border-t border-zinc-800 pt-4">
+              <div class="mb-2 flex items-center justify-between text-sm">
+                <span>Threshold</span>
+                <div class="flex rounded border border-zinc-700 p-0.5">
+                  <button
+                    v-for="mode in (['auto', 'manual'] as const)"
+                    :key="mode"
+                    class="rounded px-2.5 py-0.5 font-mono text-[11px] uppercase tracking-wider transition"
+                    :class="s.thresholdMode === mode ? 'bg-emerald-500/20 text-emerald-300' : 'text-zinc-500 hover:text-zinc-300'"
+                    @click="s.thresholdMode = mode"
+                  >
+                    {{ mode }}
+                  </button>
                 </div>
-                <USlider v-model="s.initialWpm" :min="5" :max="45" :step="1" />
+              </div>
+              <template v-if="s.thresholdMode === 'manual'">
+                <div class="mb-1 flex items-center justify-between text-sm">
+                  <span class="text-zinc-400">Key-down level</span>
+                  <span class="font-mono text-amber-400">{{ s.manualThresholdDb }} dB</span>
+                </div>
+                <USlider v-model="s.manualThresholdDb" :min="-60" :max="0" :step="1" />
+                <p class="mt-1 text-xs leading-snug text-zinc-500">Set it between the noise (grey mark) and the signal (green mark) on the meter.</p>
+              </template>
+              <template v-else>
+                <div class="mb-1 flex items-center justify-between text-sm">
+                  <span class="text-zinc-400">Squelch — minimum signal over noise</span>
+                  <span class="font-mono text-amber-400">{{ s.minSnrDb }} dB</span>
+                </div>
+                <USlider v-model="s.minSnrDb" :min="0" :max="20" :step="1" />
                 <p class="mt-1 text-xs leading-snug text-zinc-500">
-                  Where the dit/dah tracker starts; it re-fits itself within a character or two either way.
+                  Auto tracks the noise floor and the signal peak and keys halfway between them, with a constant-false-alarm gate against noise bursts. Raise the squelch on a noisy band, lower it for weak signals.
                 </p>
-              </div>
-              <div class="flex items-center justify-between text-sm">
-                <span>Lock speed <span class="text-zinc-500">(no adaptation)</span></span>
-                <USwitch v-model="s.lockSpeed" />
-              </div>
-              <div>
-                <div class="mb-1 flex items-center justify-between text-sm">
-                  <span>Speed averaging</span>
-                  <span class="font-mono text-emerald-400">{{ s.speedAveraging.toFixed(2) }}</span>
+              </template>
+            </div>
+
+            <div class="border-t border-zinc-800 pt-3">
+              <button class="flex w-full items-center justify-between text-sm text-zinc-300" @click="showAdvanced = !showAdvanced">
+                <span class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Timing & noise blanker</span>
+                <UIcon :name="showAdvanced ? 'i-lucide-chevron-up' : 'i-lucide-chevron-down'" class="size-4 text-zinc-500" />
+              </button>
+              <div v-if="showAdvanced" class="mt-3 space-y-4">
+                <div>
+                  <div class="mb-1 flex items-center justify-between text-sm">
+                    <span>Expected speed <span class="text-zinc-500">(seed)</span></span>
+                    <span class="flex items-center gap-2 font-mono text-emerald-400">
+                      {{ s.initialWpm }} WPM
+                      <UButton size="xs" variant="soft" color="neutral" icon="i-lucide-rotate-ccw" title="Re-seed the speed tracker" @click="reseedSpeed" />
+                    </span>
+                  </div>
+                  <USlider v-model="s.initialWpm" :min="5" :max="45" :step="1" />
+                  <p class="mt-1 text-xs leading-snug text-zinc-500">
+                    Where the dit/dah tracker starts; it re-fits itself within a character or two either way.
+                  </p>
                 </div>
-                <USlider v-model="s.speedAveraging" :min="0.05" :max="1" :step="0.05" />
-                <p class="mt-1 text-xs leading-snug text-zinc-500">Weight of each new element in the timing estimate — low is steady, high follows an erratic fist.</p>
-              </div>
-              <div>
-                <div class="mb-1 flex items-center justify-between text-sm">
-                  <span>Noise blanker</span>
-                  <span class="font-mono text-emerald-400">{{ s.noiseBlankerMs }} ms</span>
+                <div class="flex items-center justify-between text-sm">
+                  <span>Lock speed <span class="text-zinc-500">(no adaptation)</span></span>
+                  <USwitch v-model="s.lockSpeed" />
                 </div>
-                <USlider v-model="s.noiseBlankerMs" :min="2" :max="30" :step="1" />
-                <p class="mt-1 text-xs leading-snug text-zinc-500">Key changes shorter than this are ignored. A 30 WPM dit is 40 ms, so stay well under that.</p>
-              </div>
-              <div class="flex items-center justify-between text-sm">
-                <span>Bandpass pre-filter <span class="text-zinc-500">(before the detector)</span></span>
-                <USwitch v-model="s.prefilter" />
+                <div>
+                  <div class="mb-1 flex items-center justify-between text-sm">
+                    <span>Speed averaging</span>
+                    <span class="font-mono text-emerald-400">{{ s.speedAveraging.toFixed(2) }}</span>
+                  </div>
+                  <USlider v-model="s.speedAveraging" :min="0.05" :max="1" :step="0.05" />
+                  <p class="mt-1 text-xs leading-snug text-zinc-500">Weight of each new element in the timing estimate — low is steady, high follows an erratic fist.</p>
+                </div>
+                <div>
+                  <div class="mb-1 flex items-center justify-between text-sm">
+                    <span>Noise blanker</span>
+                    <span class="font-mono text-emerald-400">{{ s.noiseBlankerMs }} ms</span>
+                  </div>
+                  <USlider v-model="s.noiseBlankerMs" :min="2" :max="30" :step="1" />
+                  <p class="mt-1 text-xs leading-snug text-zinc-500">Key changes shorter than this are ignored. A 30 WPM dit is 40 ms, so stay well under that.</p>
+                </div>
+                <div class="flex items-center justify-between text-sm">
+                  <span>Bandpass pre-filter <span class="text-zinc-500">(before the detector)</span></span>
+                  <USwitch v-model="s.prefilter" />
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      </UCard>
+        </UCard>
+      </div>
     </div>
 
     <p class="text-xs leading-relaxed text-zinc-600">

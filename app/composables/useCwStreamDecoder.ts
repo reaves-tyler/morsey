@@ -1,5 +1,6 @@
 import { CwDecoder, DEFAULT_DECODER_CONFIG, type CwDecoderConfig, type CwDecoderState } from '~/utils/cwDecoder'
 import { toInt16, wavHeader16 } from '~/utils/cwSynth'
+import { MonitorAgc, MONITOR_AGC_LOOKAHEAD_MS } from '~/utils/monitorAgc'
 
 /**
  * Browser adapter for the pure CW stream decoder (utils/cwDecoder.ts).
@@ -13,7 +14,7 @@ import { toInt16, wavHeader16 } from '~/utils/cwSynth'
  *   [source] → [BiquadFilter bandpass] → [AudioWorklet: PCM forwarder] → decoder
  *      ├────→ [AnalyserNode] (spectrum display, unfiltered so QRM is visible)
  *      ├────→ [AudioWorklet: PCM forwarder] → recorder (raw WAV capture)
- *      └────→ [GainNode: monitor] → destination (headphone passthrough)
+ *      └────→ [AudioWorklet: leveller (AGC)] → [GainNode: monitor] → destination (headphones)
  *
  * Sources: the rig on a line / aux input (a laptop's combo jack or a USB
  * sound card), a microphone held to the rig's speaker, or an audio file.
@@ -27,7 +28,10 @@ import { toInt16, wavHeader16 } from '~/utils/cwSynth'
  * at an adjustable level. Line inputs monitor by default; a microphone into
  * speakers is a feedback loop, so the mic monitor defaults off and the UI
  * says to wear headphones. The output device can be chosen where the browser
- * supports `AudioContext.setSinkId` (Chromium).
+ * supports `AudioContext.setSinkId` (Chromium). The leveller (utils/monitorAgc.ts)
+ * evens out the rig's near-full-scale sidetone and its much quieter receive
+ * audio so the operator stops riding the volume between over and back; the
+ * monitor slider then sets the listening level of the levelled signal.
  *
  * Module-level singleton like useKeyer: the graph survives navigation, like
  * a rig left switched on; only Stop tears it down.
@@ -58,6 +62,8 @@ export interface DecodeSettings {
   monitorMic: boolean
   /** monitor gain, 0–2 (unity = 1); the rig's AF gain sets the decoder level, this sets the headphone level */
   monitorLevel: number
+  /** level the monitor with the AGC so transmit sidetone and receive audio come out at the same volume */
+  monitorAgc: boolean
   /** apply the analog-style bandpass pre-filter before the detector */
   prefilter: boolean
   /** remembered line / aux input device (`DEFAULT_DEVICE` = auto: the jack or USB codec if one is recognised, else the browser default) */
@@ -100,6 +106,7 @@ function defaultSettings(): DecodeSettings {
     monitor: true,
     monitorMic: false,
     monitorLevel: 1,
+    monitorAgc: true,
     prefilter: true,
     lineDeviceId: DEFAULT_DEVICE,
     micDeviceId: DEFAULT_DEVICE,
@@ -132,8 +139,43 @@ export interface SignalReport {
   confidence: number
 }
 
-/** The worklet is tiny and dependency-free, so it ships inline as a Blob — no base-URL or precache concerns. */
+/**
+ * The worklets are tiny and dependency-free, so they ship inline as a Blob —
+ * no base-URL or precache concerns. The leveller embeds the pure MonitorAgc
+ * class verbatim (it is written to be self-contained for exactly this; the
+ * unit tests check that) and reports its gain to the main thread ~10×/s.
+ */
 const WORKLET_SOURCE = `
+// bound by name here because the bundler renames the class in the source text
+const MonitorAgc = ${MonitorAgc.toString()}
+class MonitorLeveller extends AudioWorkletProcessor {
+  constructor() {
+    super()
+    this.agc = new MonitorAgc(sampleRate)
+    this.since = 0
+    this.port.onmessage = (e) => {
+      if (e.data && typeof e.data.enabled === 'boolean') this.agc.setEnabled(e.data.enabled)
+      if (e.data && e.data.reset) this.agc.reset()
+    }
+  }
+  process(inputs, outputs) {
+    const inp = inputs[0] && inputs[0][0]
+    const out = outputs[0] && outputs[0][0]
+    if (!out) return true
+    if (inp) {
+      this.agc.process(inp, out)
+      this.since += inp.length
+      if (this.since >= sampleRate / 10) {
+        this.since = 0
+        this.port.postMessage(this.agc.gainDb())
+      }
+    } else {
+      out.fill(0)
+    }
+    return true
+  }
+}
+registerProcessor('morsey-monitor-leveller', MonitorLeveller)
 class PcmForwarder extends AudioWorkletProcessor {
   constructor() {
     super()
@@ -180,6 +222,8 @@ const playbackProgress = ref(0) // 0..1 for the file source
  * for a zero-delay sidetone the operator splits the rig's headphone out.
  */
 const latencyMs = ref(0)
+/** gain the monitor leveller is currently applying, dB (what the AGC readout shows) */
+const monitorGainDb = ref(0)
 const meter = ref<CwDecoderState>({
   magnitude: 0, floor: 0, peak: 0, threshold: 0, snrDb: 0, keyed: false,
   ditMs: 60, dahMs: 180, wpm: 20, letterGapMs: 180, wordGapMs: 420, pattern: '', timeMs: 0, calibrated: false, confidence: 1
@@ -216,6 +260,8 @@ let recordChunks: Int16Array[] = []
 let recordSampleRate = 0
 let analyser: AnalyserNode | null = null
 let monitorGain: GainNode | null = null
+/** the leveller in front of the monitor gain (null where AudioWorklet is unavailable: monitor is then unlevelled) */
+let agcNode: AudioWorkletNode | null = null
 let sinkGain: GainNode | null = null
 let rafHandle = 0
 let playbackStart = 0
@@ -351,6 +397,7 @@ export function useCwStreamDecoder() {
       filterNode.Q.setTargetAtTime(prefilterQ(s), ctx.currentTime, 0.02)
     }
     if (monitorGain && ctx) monitorGain.gain.setTargetAtTime(monitorTarget(s), ctx.currentTime, 0.02)
+    agcNode?.port.postMessage({ enabled: s.monitorAgc })
   }
 
   /** (re)connect source → [filter] → tap, honouring the prefilter toggle */
@@ -361,7 +408,8 @@ export function useCwStreamDecoder() {
     try { sourceNode.disconnect() } catch { /* not connected yet */ }
     try { filterNode?.disconnect() } catch { /* not connected yet */ }
     if (analyser) sourceNode.connect(analyser)
-    if (monitorGain) sourceNode.connect(monitorGain)
+    if (agcNode) sourceNode.connect(agcNode)
+    else if (monitorGain) sourceNode.connect(monitorGain)
     if (recorderNode) sourceNode.connect(recorderNode)
     if (settings.value.prefilter && filterNode) {
       sourceNode.connect(filterNode)
@@ -391,16 +439,27 @@ export function useCwStreamDecoder() {
     )
   }
 
+  /** Load the inline worklet module once; false where AudioWorklet is unavailable or blocked. */
+  async function loadWorklet(audio: AudioContext): Promise<boolean> {
+    if (!audio.audioWorklet) return false
+    if (workletLoaded) return true
+    try {
+      const url = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: 'application/javascript' }))
+      await audio.audioWorklet.addModule(url)
+      URL.revokeObjectURL(url)
+      workletLoaded = true
+      return true
+    } catch (err) {
+      // older Safari, or CSP blocking blob workers — or a broken inline module, which must not fail silently
+      console.warn('[decode] AudioWorklet unavailable, falling back to ScriptProcessor:', err)
+      return false
+    }
+  }
+
   /** A node that hands every 1024-sample PCM block to `onBlock` (worklet, with ScriptProcessor fallback). */
   async function buildTap(audio: AudioContext, onBlock: (block: Float32Array) => void): Promise<AudioNode> {
-    if (audio.audioWorklet) {
+    if (await loadWorklet(audio)) {
       try {
-        if (!workletLoaded) {
-          const url = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: 'application/javascript' }))
-          await audio.audioWorklet.addModule(url)
-          URL.revokeObjectURL(url)
-          workletLoaded = true
-        }
         const node = new AudioWorkletNode(audio, 'morsey-pcm-forwarder', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1 })
         node.port.onmessage = (e: MessageEvent<Float32Array>) => onBlock(e.data)
         return node
@@ -433,6 +492,17 @@ export function useCwStreamDecoder() {
     monitorGain = audio.createGain()
     monitorGain.gain.value = 0
     monitorGain.connect(audio.destination)
+    // leveller in front of the monitor gain — see utils/monitorAgc.ts
+    if (await loadWorklet(audio)) {
+      try {
+        agcNode = new AudioWorkletNode(audio, 'morsey-monitor-leveller', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, outputChannelCount: [1] })
+        agcNode.port.onmessage = (e: MessageEvent<number>) => { monitorGainDb.value = e.data }
+        agcNode.port.postMessage({ enabled: settings.value.monitorAgc })
+        agcNode.connect(monitorGain)
+      } catch {
+        agcNode = null
+      }
+    }
 
     // The tap runs whenever the graph does — between runs it carries silence,
     // which must not reach the decoder (it would warm up on nothing and then
@@ -587,6 +657,7 @@ export function useCwStreamDecoder() {
       if (audio.state === 'suspended') await audio.resume()
       teardownSource()
       decoder?.reset()
+      agcNode?.port.postMessage({ reset: true })
       lastKeyMs = 0
       pattern.value = ''
       elements.value = []
@@ -613,7 +684,8 @@ export function useCwStreamDecoder() {
         ;(constraints as Record<string, unknown>).latency = { ideal: 0 }
         stream = await navigator.mediaDevices.getUserMedia({ audio: constraints, video: false })
         sourceNode = audio.createMediaStreamSource(stream)
-        latencyMs.value = measureLatency(audio, stream)
+        // the leveller's lookahead delay sits in the monitor path whether or not it is levelling
+        latencyMs.value = measureLatency(audio, stream) + (agcNode ? MONITOR_AGC_LOOKAHEAD_MS : 0)
         rewire()
         refreshDevices()
         // A microphone hears the keyer sidetone from the speakers and would
@@ -790,14 +862,14 @@ export function useCwStreamDecoder() {
 
   /** Filter/threshold defaults; device choices and monitor routing are wiring, not tuning, and stay */
   function resetSettings() {
-    const { lineDeviceId, micDeviceId, outputDeviceId, monitor, monitorMic, monitorLevel } = settings.value
-    settings.value = { ...defaultSettings(), lineDeviceId, micDeviceId, outputDeviceId, monitor, monitorMic, monitorLevel }
+    const { lineDeviceId, micDeviceId, outputDeviceId, monitor, monitorMic, monitorLevel, monitorAgc } = settings.value
+    settings.value = { ...defaultSettings(), lineDeviceId, micDeviceId, outputDeviceId, monitor, monitorMic, monitorLevel, monitorAgc }
   }
 
   return {
     // state
     listening, source, text, pattern, error, devices, outputs, devicesLabelled, suggestedLineDevice, canSelectOutput,
-    fileName, playbackProgress, latencyMs, meter, elements, settings, report,
+    fileName, playbackProgress, latencyMs, monitorGainDb, meter, elements, settings, report,
     recording, recordingState, recordedSeconds, recordedBytes,
     // actions
     start, stop, clear, loadFile, refreshDevices, requestDevicePermission, resetTiming, resetLevels, resetSettings, spectrum, spectrumBins,

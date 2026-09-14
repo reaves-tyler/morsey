@@ -11,6 +11,8 @@ const DEFAULT_DESCRIPTION =
   'Learn Morse code by ear with a free, open-source CW trainer: Koch method, Farnsworth timing, Q-signals, sending practice with a real key or paddle, a QSO simulator and a live on-air decoder. Runs in the browser, works offline.'
 
 const route = useRoute()
+/** pages that opt out of the centred column (decode: the stream and its controls each take a half of the screen) */
+const wide = computed(() => route.meta.wide === true)
 // GitHub Pages serves prerendered routes at /learn/ and 301s /learn there, so
 // the canonical (and og:url) must carry the trailing slash to match.
 const canonical = computed(() => {
@@ -126,7 +128,7 @@ const mobileLinks = [
     <NuxtPwaManifest />
     <div class="min-h-screen flex flex-col bg-zinc-950 text-zinc-100">
       <header class="sticky top-0 z-40 border-b border-zinc-800/80 bg-zinc-950/80 backdrop-blur">
-        <div class="mx-auto flex max-w-5xl items-center justify-between gap-4 px-4 py-3">
+        <div class="mx-auto flex items-center justify-between gap-4 px-4 py-3" :class="wide ? 'max-w-none xl:px-6' : 'max-w-5xl'">
           <NuxtLink to="/" class="flex items-center gap-2 font-semibold tracking-tight">
             <span class="flex size-7 items-center justify-center rounded-md bg-emerald-500/15 font-mono text-sm text-emerald-400">-.-</span>
             <span class="text-zinc-100">Morsey</span>
@@ -143,10 +145,15 @@ const mobileLinks = [
               {{ link.label }}
             </NuxtLink>
 
-            <!-- Quick reference overlay: opens over any page without leaving it -->
+            <!-- Quick reference panel: non-modal and without the dimming overlay so the
+                 page stays readable and usable beside it; the X or Escape closes it -->
             <USlideover
               title="Reference"
               description="Quick legend — click anything to hear it"
+              :overlay="false"
+              :modal="false"
+              :content="{ onInteractOutside: (e: Event) => e.preventDefault() }"
+              :ui="{ content: 'shadow-2xl shadow-black/60' }"
             >
               <button
                 class="flex items-center gap-1 rounded-md px-3 py-1.5 text-sm text-zinc-400 transition hover:text-zinc-100"
@@ -210,7 +217,7 @@ const mobileLinks = [
         </nav>
       </header>
 
-      <main class="mx-auto w-full max-w-5xl flex-1 px-4 py-8 pb-20">
+      <main class="mx-auto w-full flex-1 px-4 py-8 pb-20" :class="wide ? 'max-w-none xl:px-6' : 'max-w-5xl'">
         <NuxtPage />
       </main>
 
