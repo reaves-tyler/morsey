@@ -442,11 +442,19 @@ function matchRigPitch() {
                       icon="i-lucide-rotate-ccw"
                       :disabled="!dec.listening.value"
                       class="whitespace-nowrap normal-case tracking-normal"
-                      title="Re-learn the noise floor and signal peak — press after changing the rig's volume or the interface gain. Text and speed tracking are kept."
+                      title="Throw away the measured levels and learn them again from the next few seconds — press after changing the rig's volume or the interface gain. Text and speed tracking are kept."
                       @click="dec.resetLevels()"
                     >
                       Reset levels
                     </UButton>
+                    <span
+                      v-if="dec.listening.value"
+                      class="rounded px-1.5 py-0.5 normal-case tracking-normal"
+                      :class="m.signalPresent ? 'bg-emerald-500/15 text-emerald-400' : 'bg-zinc-800 text-zinc-500'"
+                      :title="m.signalPresent
+                        ? 'A keyed signal is on the frequency: copy is being printed.'
+                        : 'Squelched — the levels in the passband are band noise, not a transmission. Anything the gate catches is held back rather than printed as E and T.'"
+                    >{{ m.signalPresent ? 'Signal' : 'Squelched' }}</span>
                   </span>
                   <span class="flex gap-3 normal-case tracking-normal">
                     <span class="text-zinc-500">▮ floor</span>
@@ -688,7 +696,7 @@ function matchRigPitch() {
               </template>
               <template v-else>
                 Plugging into the rig's headphone jack silences its speaker; the input is passed straight through to your headphones so you still hear the band. The rig's volume sets the decoder level, this sets yours.
-                Levelling evens out the rig's loud sidetone and its quieter receive audio, so you stop turning the volume down to transmit and back up to copy. It holds its gain through the gaps of a transmission and recovers over a few seconds after one ends; switch it off to hear the raw levels.
+                Levelling evens out the rig's loud sidetone and its quieter receive audio, so you stop turning the volume down to transmit and back up to copy. It holds its gain through the gaps of a transmission and recovers over a few seconds after one ends; switch it off to hear the rig's own levels. Between overs it will run up to its <span class="text-zinc-400">+30 dB</span> limit and bring the band noise up with it, so a quiet band sounds far noisier in your headphones than it is on the air — what the decoder sees is the <span class="text-zinc-400">S/N</span> figure on the signal report, not what you are hearing.
                 The browser adds a few tens of milliseconds each way, which you will notice when keying. For a zero-delay sidetone, put a Y-splitter on the rig's headphone jack — one leg to the laptop, one to your headphones — and switch this monitor off.
               </template>
             </p>
@@ -715,7 +723,7 @@ function matchRigPitch() {
                 icon="i-lucide-circle"
                 :disabled="!dec.listening.value"
                 class="font-mono uppercase tracking-wider"
-                title="Record the raw input to a WAV take (what the decoder hears, before filtering) — for replaying real on-air audio through the decoder tests"
+                title="Record a WAV take of what you are hearing — the monitor signal, levelling and all, before the volume slider. Switch the leveller off to capture the rig's own levels instead."
                 @click="recordOrResume"
               >
                 Rec
@@ -813,7 +821,7 @@ function matchRigPitch() {
                 </div>
                 <USlider v-model="s.minSnrDb" :min="0" :max="20" :step="1" />
                 <p class="mt-1 text-xs leading-snug text-zinc-500">
-                  Auto tracks the noise floor and the signal peak and keys halfway between them, with a constant-false-alarm gate against noise bursts. Raise the squelch on a noisy band, lower it for weak signals.
+                  Auto measures the distribution of levels in the passband and keys halfway up a signal it can see, never closer to the noise than a constant-false-alarm gate allows. While that distribution shows no transmission the pill by the meter reads <span class="text-zinc-400">Squelched</span> and nothing is printed, so a dead band stays a blank page instead of a page of E and T. Raise this on a noisy band, lower it for weak signals.
                 </p>
               </template>
             </div>

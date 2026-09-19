@@ -13,8 +13,17 @@ import { MonitorAgc, MONITOR_AGC_LOOKAHEAD_MS } from '~/utils/monitorAgc'
  *
  *   [source] → [BiquadFilter bandpass] → [AudioWorklet: PCM forwarder] → decoder
  *      ├────→ [AnalyserNode] (spectrum display, unfiltered so QRM is visible)
- *      ├────→ [AudioWorklet: PCM forwarder] → recorder (raw WAV capture)
- *      └────→ [AudioWorklet: leveller (AGC)] → [GainNode: monitor] → destination (headphones)
+ *      └────→ [AudioWorklet: leveller (AGC)] ─┬→ [GainNode: monitor] → destination (headphones)
+ *                                             └→ [AudioWorklet: PCM forwarder] → recorder (WAV)
+ *
+ * The recorder hangs off the leveller's output, not the raw source, so the
+ * exported WAV is the audio the operator heard in their headphones — take the
+ * leveller's gain out of the recording and a take made on a quiet band plays
+ * back far cleaner than the band sounded, which is misleading when the whole
+ * point of a take is to document what was on the air. It is tapped before the
+ * monitor gain, so the operator's volume setting is not baked in, and the
+ * leveller passes audio through untouched when it is switched off — which is
+ * how to record a take at the rig's own levels for decoder fixtures.
  *
  * Sources: the rig on a line / aux input (a laptop's combo jack or a USB
  * sound card), a microphone held to the rig's speaker, or an audio file.
@@ -226,13 +235,15 @@ const latencyMs = ref(0)
 const monitorGainDb = ref(0)
 const meter = ref<CwDecoderState>({
   magnitude: 0, floor: 0, peak: 0, threshold: 0, snrDb: 0, keyed: false,
-  ditMs: 60, dahMs: 180, wpm: 20, letterGapMs: 180, wordGapMs: 420, pattern: '', timeMs: 0, calibrated: false, confidence: 1
+  ditMs: 60, dahMs: 180, wpm: 20, letterGapMs: 180, wordGapMs: 420, pattern: '', timeMs: 0, calibrated: false, signalPresent: false, confidence: 1
 })
 /**
- * Raw-input recorder (for capturing real on-air audio to replay through the
- * decoder tests). A take is independent of listening: pause keeps it, Stop
- * listening only pauses it, export downloads and ends it, discard drops it.
- * Nothing here touches the decoder or the terminal.
+ * Recorder, capturing what the monitor plays (for documenting a session and
+ * for replaying real on-air audio through the decoder tests — switch the
+ * leveller off for the latter, so the take carries the rig's own levels).
+ * A take is independent of listening: pause keeps it, Stop listening only
+ * pauses it, export downloads and ends it, discard drops it. Nothing here
+ * touches the decoder or the terminal.
  */
 export type RecordingState = 'idle' | 'recording' | 'paused'
 const recordingState = ref<RecordingState>('idle')
@@ -410,7 +421,9 @@ export function useCwStreamDecoder() {
     if (analyser) sourceNode.connect(analyser)
     if (agcNode) sourceNode.connect(agcNode)
     else if (monitorGain) sourceNode.connect(monitorGain)
-    if (recorderNode) sourceNode.connect(recorderNode)
+    // the recorder follows the leveller (see the graph at the top), falling
+    // back to the raw source only if the worklet could not be built
+    if (recorderNode && !agcNode) sourceNode.connect(recorderNode)
     if (settings.value.prefilter && filterNode) {
       sourceNode.connect(filterNode)
       filterNode.connect(tap)
@@ -515,9 +528,11 @@ export function useCwStreamDecoder() {
     sinkGain = audio.createGain()
     sinkGain.gain.value = 0
     tap.connect(sinkGain).connect(audio.destination)
-    // second tap on the *raw* source for the recorder (before the pre-filter)
+    // second tap for the recorder, on what the headphones get (before the
+    // monitor volume) so a take sounds like the session it came from
     recorderNode = await buildTap(audio, onRecordBlock)
     recorderNode.connect(sinkGain)
+    agcNode?.connect(recorderNode)
     return audio
   }
 
@@ -713,7 +728,7 @@ export function useCwStreamDecoder() {
     }
   }
 
-  // ---- raw-input recorder -------------------------------------------------------------
+  // ---- recorder (taps the monitor path — see the graph at the top) -------------------------------------------------------------
 
   function onRecordBlock(block: Float32Array) {
     if (recordingState.value !== 'recording' || !sourceNode) return

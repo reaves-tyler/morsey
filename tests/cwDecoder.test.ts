@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CwDecoder, charForPattern, PATTERN_TO_CHAR, type CwDecoderConfig } from '../app/utils/cwDecoder'
+import { CwDecoder, MAX_WPM, MIN_WPM, charForPattern, PATTERN_TO_CHAR, type CwDecoderConfig } from '../app/utils/cwDecoder'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { renderCw, noiseRmsForSnr, encodeWav16, decodeWav16, SAMPLE_PRESETS, type CwSynthOptions } from '../app/utils/cwSynth'
@@ -133,14 +133,40 @@ describe('clean machine-sent code', () => {
   })
 
   it('emits characters in real time — before the next character starts', () => {
-    // A single "E" followed by a long silence must still be decoded
-    const { samples } = renderCw({ sampleRate: FS, text: 'E', wpm: 20, tailSec: 1 })
+    const { samples } = renderCw({ sampleRate: FS, text: 'H H', wpm: 20, tailSec: 1 })
     let seenAtMs = -1
-    const decoder = new CwDecoder({ sampleRate: FS }, { onCharacter: () => { seenAtMs = decoder.timeMs } })
+    const decoder = new CwDecoder({ sampleRate: FS }, { onCharacter: () => { if (seenAtMs < 0) seenAtMs = decoder.timeMs } })
     decoder.process(samples)
-    // lead-in 300 ms + 60 ms dit + a letter boundary of ~2 dits: well under 600 ms
-    expect(seenAtMs).toBeGreaterThan(300)
-    expect(seenAtMs).toBeLessThan(600)
+    // lead-in 300 ms + H (four 60 ms dits, three 60 ms gaps) ends at 720 ms; a
+    // letter boundary of ~2 dits prints it around 820 ms, while the second H
+    // does not start until 1140 ms
+    expect(seenAtMs).toBeGreaterThan(700)
+    expect(seenAtMs).toBeLessThan(1000)
+  })
+
+  it('drops a squelched burst on reset instead of printing it into the next session', () => {
+    // Start on the decode page calls reset(). A burst that never qualified
+    // belongs to the session that ended, not the one beginning.
+    const lone = renderCw({ sampleRate: FS, text: 'K', wpm: 20, tailSec: 1 }).samples
+    const next = renderCw({ sampleRate: FS, text: 'CQ DE W1AW', wpm: 20 }).samples
+    let text = ''
+    const decoder = new CwDecoder({ sampleRate: FS }, { onCharacter: ch => { text += ch }, onWordGap: () => { text += ' ' } })
+    decoder.process(lone)
+    decoder.flush()
+    expect(text).toBe('')
+    decoder.reset()
+    decoder.process(next)
+    decoder.flush()
+    expect(text.trim()).toBe('CQ DE W1AW')
+  })
+
+  it('does not print a lone blip as a letter', () => {
+    // One mark with silence on both sides is a static crash, not an E. Real
+    // code arrives in runs — even a bare "K" is three elements at the end of
+    // an over — so a burst has to reach four elements before it is printed.
+    expect(decodeText({ text: 'E', wpm: 20, tailSec: 1 }).text).toBe('')
+    expect(decodeText({ text: 'K', wpm: 20, tailSec: 1 }).text).toBe('')
+    expect(decodeText({ text: 'OK', wpm: 20, tailSec: 1 }).text).toBe('OK')
   })
 })
 
@@ -164,6 +190,15 @@ describe('spacing styles', () => {
     const want = 'UR RST 579 579 = NAME OP = QTH TOWN K'
     const { text } = decodeText({ text: want, wpm: 15, weight: 3.8, jitter: 0.15, seed: 5 })
     expect(accuracy(text, want)).toBeGreaterThan(0.95)
+  })
+
+  it.each([12, 10, 7, 5])('decodes ARRL Farnsworth 20/%i once the first word gap reveals the spacing', (effectiveWpm) => {
+    // 20/5 leaves ~62 dits between words and ~27 between letters. Any rule that
+    // writes off long silences has to clear that, or every stretched letter gap
+    // prints as a word space and the whole over comes out letter by letter.
+    const want = 'HELLO WORLD THIS IS FARNSWORTH'
+    const { text } = decodeText({ text: want, wpm: 20, effectiveWpm, snrDb: 30, seed: 3 })
+    expect(text.endsWith('WORLD THIS IS FARNSWORTH'), `20/${effectiveWpm}: "${text}"`).toBe(true)
   })
 
   it('decodes a light fist (2.5:1 weight)', () => {
@@ -199,7 +234,15 @@ describe('band conditions', () => {
     const want = 'QRP QRP DE N0CALL N0CALL PSE K'
     const opts: CwSynthOptions = { text: want, wpm: 16, snrDb: -3, seed: 18 }
     expect(accuracy(decodeText(opts, { bandwidthHz: 100 }).text, want)).toBeLessThan(0.7)
-    expect(decodeText(opts, { bandwidthHz: 50 }).text).toBe(want)
+    // Not exact: at 14 dB in a 50 Hz window the signal is only ~5 σ over the
+    // noise, so it sits right on the CFAR gate and the opening characters are
+    // copied while the level histogram is still filling. The tail, once the
+    // levels have settled, is exact. Buying those first characters back means
+    // biasing the noise estimate low, which is what used to let the gate slide
+    // into the band hash between transmissions.
+    const { text } = decodeText(opts, { bandwidthHz: 50 })
+    expect(accuracy(text, want), text).toBeGreaterThanOrEqual(0.7)
+    expect(text.endsWith('N0CALL PSE K'), text).toBe(true)
   })
 
   it('rides QSB (75 % fade, 12 dB left at the trough) with the adaptive threshold', () => {
@@ -481,5 +524,163 @@ describe('real K5 recordings', () => {
     const got = text.replace(/\s+/g, '')
     expect(got, `${file}: "${text}"`).toContain('KR4NZN')
     expect(accuracy(got, letters), `${file}: "${text}"`).toBeGreaterThanOrEqual(minAccuracy)
+  })
+})
+
+/**
+ * Real band audio: takes recorded off a Yaesu FT-991A on 40 m with the decode
+ * page's Rec button, cut to the interesting minute and downsampled to 8 kHz.
+ * Unlike the K5 fixtures — a loopback of one known sender — these are the band
+ * as it actually is: DX and POTA/SOTA stations from 11 to 29 WPM, QSB, QRM,
+ * static crashes, stretches of nothing but noise between overs, and the
+ * operator's own transmissions muting the receiver.
+ *
+ * They exist because of what the decoder used to do with them. A dit estimate
+ * with no lower bound walked down onto the band hash until it read 600 WPM,
+ * and from there every noise blip was an element: one 8-minute take printed
+ * 1066 characters of which 88 % were E and T, with four of the ten phrases
+ * that were really sent nowhere in it. The assertions below are the two halves
+ * of that: the copy has to be there, and the junk around it has to not be.
+ *
+ * `phrases` are matched with spacing removed. The spacing in these takes is
+ * the senders' own — several of them leave 5–7 dits between letters, which no
+ * timing rule can tell from a word gap — so word breaks are not asserted.
+ */
+describe('real Yaesu FT-991A band recordings', () => {
+  const dir = join(__dirname, 'fixtures', 'ft991a')
+  /** band noise with no signal in it — a stress source, not a take (see the suite below) */
+  const NOISE_FILE = '991a-band-noise.wav'
+  const TAKES: { file: string; phrases: string[]; maxEtShare: number; maxChars: number }[] = [
+    // a strong European IOTA station calling CQ over and over at 25 WPM
+    { file: '991a-iota-cq.wav', phrases: ['CQ VE2/LX1NO/P IOTA NA128'], maxEtShare: 0.15, maxChars: 90 },
+    // 12 WPM ragchew, wide letter spacing, deep fades
+    { file: '991a-dennis-rig.wav', phrases: ['FB DENNIS', 'RIG HR IS'], maxEtShare: 0.3, maxChars: 55 },
+    { file: '991a-wb3bvz-qth.wav', phrases: ['QTHISCAR', 'RST5'], maxEtShare: 0.3, maxChars: 55 },
+    // nothing on frequency but band noise until a "CQ TEST" at the very end:
+    // the old decoder printed 396 characters here, 97 % of them E and T
+    { file: '991a-dead-band.wav', phrases: ['QTEST'], maxEtShare: 0.7, maxChars: 14 },
+    { file: '991a-k5wva-579.wav', phrases: ['KR4NZNK5WVATU579WV', 'CQCQTEST'], maxEtShare: 0.25, maxChars: 55 },
+    { file: '991a-pota-ke2mtk.wav', phrases: ['POTADEKE2MT', 'KR4NZN'], maxEtShare: 0.35, maxChars: 60 },
+    { file: '991a-pota-kg4exy.wav', phrases: ['57N57NBK', 'CQPOTAKG4EXY'], maxEtShare: 0.2, maxChars: 60 },
+    { file: '991a-sota-w3pd029.wav', phrases: ['SOTAREFW3/PD029W3/PD029', 'TNX', 'NOPOTANOPOTA'], maxEtShare: 0.3, maxChars: 85 },
+    // starts inside the operator's own transmission, where the receiver is
+    // muted and its residue is 30 dB over a floor that has collapsed with it
+    { file: '991a-w2lcq-rst.wav', phrases: ['NZNDEW2LCQOKUR', '569569OK'], maxEtShare: 0.45, maxChars: 65 },
+    { file: '991a-w2lcq-de.wav', phrases: ['DEW2LCQ'], maxEtShare: 0.5, maxChars: 20 }
+  ]
+
+  it('has a fixture entry for every WAV in the folder', () => {
+    const wavs = readdirSync(dir).filter(f => f.endsWith('.wav') && f !== NOISE_FILE).sort()
+    expect(wavs).toEqual(TAKES.map(t => t.file).sort())
+  })
+
+  it.each(TAKES)('$file: copies what was sent', ({ file, phrases }) => {
+    const { text } = decodeTake(file)
+    const flat = text.replace(/\s+/g, '')
+    for (const p of phrases) expect(flat, `${file}: "${text}"`).toContain(p.replace(/ /g, ''))
+  })
+
+  it.each(TAKES)('$file: prints nothing much else', ({ file, maxEtShare, maxChars }) => {
+    const { chars, text, maxWpm } = decodeTake(file)
+    // E and T are one element each: they are what a decoder keying on noise
+    // produces, and their share is the cleanest measure of how much of the
+    // page is junk. Real English CW runs about 20 %.
+    const et = chars.filter(c => c === 'E' || c === 'T').length / Math.max(1, chars.length)
+    expect(et, `${file}: "${text}"`).toBeLessThanOrEqual(maxEtShare)
+    expect(chars.length, `${file}: "${text}"`).toBeLessThanOrEqual(maxChars)
+    // the speed estimate never leaves the range CW is sent at
+    expect(maxWpm, file).toBeLessThanOrEqual(MAX_WPM)
+  })
+
+  function decodeTake(file: string) {
+    const { samples, sampleRate } = decodeWav16(readFileSync(join(dir, file)).buffer as ArrayBuffer)
+    expect(sampleRate).toBe(8000)
+    let text = ''
+    const chars: string[] = []
+    let maxWpm = 0
+    const decoder = new CwDecoder({ sampleRate }, {
+      onCharacter: ch => { text += ch; chars.push(ch) },
+      onWordGap: () => { text += ' ' }
+    })
+    for (let i = 0; i < samples.length; i += 1024) {
+      decoder.process(samples.subarray(i, Math.min(samples.length, i + 1024)))
+      maxWpm = Math.max(maxWpm, decoder.getState().wpm)
+    }
+    decoder.flush()
+    return { text: text.trim(), chars, maxWpm }
+  }
+})
+
+/**
+ * Real signal, real static, and a number on the ratio between them.
+ *
+ * The takes above are all comfortable signals — 14 to 37 dB over the noise in
+ * a 2.5 kHz bandwidth — because that is what was on the band those afternoons.
+ * Tuning a decoder only on those would be tuning it on armchair copy, so this
+ * mixes `991a-band-noise.wav` (forty seconds of the same rig on a dead 40 m,
+ * measured stationary and Rayleigh to within 0.5 dB at every quantile, static
+ * crashes included) into the machine-keyed IOTA CQ at a stated SNR.
+ *
+ * Only the ratio is synthetic. The noise is the real band through the real
+ * receiver, which matters: it is shaped — the FT-991A's CW filter peaks it
+ * around 500–600 Hz, right where the detector sits — so it costs more than
+ * white noise at the same quoted SNR, and the numbers here are correspondingly
+ * harsher than the synthesized cases above.
+ */
+describe('real band noise over a real signal', () => {
+  const dir = join(__dirname, 'fixtures', 'ft991a')
+  const WANT = 'CQ VE2/LX1NO/P IOTA NA128'
+
+  function mixed(snrDb: number) {
+    const sig = decodeWav16(readFileSync(join(dir, '991a-iota-cq.wav')).buffer as ArrayBuffer)
+    const noise = decodeWav16(readFileSync(join(dir, '991a-band-noise.wav')).buffer as ArrayBuffer)
+    expect(sig.sampleRate).toBe(noise.sampleRate)
+    // the clip's tone amplitude, as `noiseRmsForSnr` means it
+    const peaks = Float32Array.from(sig.samples, Math.abs).sort()
+    const amplitude = peaks[Math.floor(0.999 * peaks.length)]!
+    let sum = 0
+    for (const v of noise.samples) sum += v * v
+    const scale = noiseRmsForSnr(snrDb, amplitude, sig.sampleRate) / Math.sqrt(sum / noise.samples.length)
+    const out = new Float32Array(sig.samples.length)
+    let peak = 0
+    for (let i = 0; i < out.length; i++) {
+      out[i] = sig.samples[i]! + scale * noise.samples[i % noise.samples.length]!
+      peak = Math.max(peak, Math.abs(out[i]!))
+    }
+    if (peak > 0.99) for (let i = 0; i < out.length; i++) out[i]! *= 0.99 / peak
+    return out
+  }
+
+  function copies(text: string) {
+    return (text.replace(/\s+/g, '').match(/CQVE2\/LX1NO\/PIOTANA128/g) || []).length
+  }
+
+  it.each([15, 12, 9])('copies the call under real static at %i dB', (snrDb) => {
+    const { text, state } = decodeAudio(mixed(snrDb))
+    expect(copies(text), `${snrDb} dB: "${text}"`).toBeGreaterThanOrEqual(2)
+    expect(state.wpm).toBeGreaterThan(20)
+    expect(state.wpm).toBeLessThan(32)
+  })
+
+  it('needs the filter narrowed at 6 dB, which is what the bandwidth control is for', () => {
+    // the default 100 Hz window lets too much of a shaped noise floor through
+    const wide = decodeAudio(mixed(6))
+    const narrow = decodeAudio(mixed(6), { bandwidthHz: 40 })
+    expect(copies(narrow.text), narrow.text).toBeGreaterThanOrEqual(1)
+    expect(copies(narrow.text)).toBeGreaterThan(copies(wide.text))
+  })
+
+  it('degrades instead of running away once the signal is unreadable', () => {
+    // 0 dB in 2.5 kHz of shaped band noise is not copyable at 25 WPM by
+    // anything, and the decoder is not expected to read it. What it must not
+    // do is what it used to: latch the dit estimate onto the noise and print
+    // hundreds of characters of E and T.
+    for (const snrDb of [3, 0]) {
+      const { text, state } = decodeAudio(mixed(snrDb))
+      expect(state.wpm, `${snrDb} dB`).toBeGreaterThanOrEqual(MIN_WPM)
+      expect(state.wpm, `${snrDb} dB`).toBeLessThanOrEqual(MAX_WPM)
+      // the clip holds 62 real characters; junk must stay the same order
+      expect(text.replace(/\s+/g, '').length, `${snrDb} dB: "${text}"`).toBeLessThan(200)
+    }
   })
 })

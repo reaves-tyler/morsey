@@ -10,3 +10,8 @@ logs
 *.log
 .DS_Store
 __pycache__
+
+# raw decode-page recordings: full-length 48 kHz takes and screenshots, kept
+# locally to cut test fixtures from. The committed fixtures are the trimmed
+# 8 kHz clips in tests/fixtures/ft991a/.
+tests/fixtures/Yaesu-FT-991A/
