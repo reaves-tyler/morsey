@@ -78,8 +78,10 @@ export interface DecodeSettings {
   monitorMic: boolean
   /** monitor gain, 0–2 (unity = 1); the rig's AF gain sets the decoder level, this sets the headphone level */
   monitorLevel: number
-  /** level the monitor with the AGC so transmit sidetone and receive audio come out at the same volume */
+  /** level the monitor (and recordings) with the AGC so transmit sidetone and receive audio come out at the same volume — off by default */
   monitorAgc: boolean
+  /** the one-time migration that switched the old leveller-on default off has run */
+  levellerDefaultOff?: boolean
   /** apply the analog-style bandpass pre-filter before the detector */
   prefilter: boolean
   /** remembered line / aux input device (`DEFAULT_DEVICE` = auto: the jack or USB codec if one is recognised, else the browser default) */
@@ -128,7 +130,8 @@ function defaultSettings(): DecodeSettings {
     monitor: true,
     monitorMic: false,
     monitorLevel: 1,
-    monitorAgc: true,
+    monitorAgc: false,
+    levellerDefaultOff: true,
     prefilter: true,
     lineDeviceId: DEFAULT_DEVICE,
     micDeviceId: DEFAULT_DEVICE,
@@ -257,7 +260,7 @@ const latencyMs = ref(0)
 const monitorGainDb = ref(0)
 const meter = ref<CwDecoderState>({
   magnitude: 0, floor: 0, peak: 0, threshold: 0, snrDb: 0, keyed: false,
-  ditMs: 60, dahMs: 180, wpm: 20, elemGapMs: 60, letterGapMs: 180, wordGapMs: 420, pattern: '', timeMs: 0, calibrated: false, signalPresent: false, confidence: 1, fsk: false, decoding: false
+  ditMs: 60, dahMs: 180, wpm: 20, elemGapMs: 60, letterGapMs: 180, wordGapMs: 420, pattern: '', timeMs: 0, calibrated: false, signalPresent: false, confidence: 1, fsk: false, decoding: false, hold: ''
 })
 /**
  * Recorder, capturing what the monitor plays (for documenting a session and
@@ -357,10 +360,17 @@ export function useCwStreamDecoder() {
       try {
         const raw = localStorage.getItem(SETTINGS_KEY)
         if (raw) {
-          const stored = JSON.parse(raw) as Partial<DecodeSettings> & { deviceId?: string }
+          const stored = JSON.parse(raw) as Partial<DecodeSettings> & { deviceId?: string; levellerDefaultOff?: boolean }
           // v1 had a single "Radio input" device: that was the cable from the rig
           if (stored.deviceId && !stored.lineDeviceId) stored.lineDeviceId = stored.deviceId
           delete stored.deviceId
+          // The leveller used to default on and could only be switched while
+          // the Morsey monitor was; a stored "on" from then is the old default,
+          // not a choice (it lifts the band noise in every recording)
+          if (!stored.levellerDefaultOff) {
+            stored.monitorAgc = false
+            stored.levellerDefaultOff = true
+          }
           settings.value = { ...defaultSettings(), ...stored }
         }
         for (const k of ['lineDeviceId', 'micDeviceId', 'outputDeviceId'] as const) {
@@ -673,10 +683,18 @@ export function useCwStreamDecoder() {
     if (t && !t.endsWith('\n')) text.value = t + '\n'
   }
 
+  let lastHold = ''
   function tick() {
     if (decoder) {
       meter.value = decoder.getState()
       if (meter.value.timeMs - lastKeyMs >= IDLE_NEWLINE_MS) newline()
+      // why keying is not being printed — in the console too, for bug reports
+      const hold = meter.value.hold
+      if (hold && hold !== lastHold && !hold.startsWith('waiting')) {
+        const m = meter.value
+        console.info(`[decode] holding: ${hold} · floor ${(20 * Math.log10(Math.max(m.floor, 1e-9))).toFixed(0)} dB, peak ${(20 * Math.log10(Math.max(m.peak, 1e-9))).toFixed(0)} dB, histogram ${m.signalPresent ? 'sees' : 'does not see'} a transmission`)
+      }
+      lastHold = hold
     }
     if (playbackDuration > 0 && ctx) {
       playbackProgress.value = Math.min(1, (ctx.currentTime - playbackStart) / playbackDuration)

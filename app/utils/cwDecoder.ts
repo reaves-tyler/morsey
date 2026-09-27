@@ -197,6 +197,8 @@ export interface CwDecoderState {
   fsk: boolean
   /** a burst has passed the squelch and is being printed */
   decoding: boolean
+  /** why the keying in progress is being held back rather than printed ('' = it is not) */
+  hold: string
 }
 
 /** Prosigns not already in the character table — shown the way the QMX prints them. */
@@ -676,6 +678,8 @@ export class CwDecoder {
   private burstGapSides: number[] = []
   /** when RTTY (two-tone FSK) was last recognised on the frequency */
   private fskSeenMs = -Infinity
+  /** why the burst in progress is not being printed ('' when it is, or there is none) */
+  private holdReason = ''
   /** the burst passed the squelch: its elements are decoded as they arrive */
   private live = false
   /** where the burst in progress began, and where the last printed one ended */
@@ -1495,20 +1499,42 @@ export class CwDecoder {
    */
   private get printable(): boolean {
     const n = this.burstMarks.length
-    if (n < (this.cfg.squelch ? BURST_ELEMENTS : 1)) return false
+    const need = this.cfg.squelch ? BURST_ELEMENTS : 1
+    if (n < need) {
+      this.holdReason = n ? `waiting for ${need} elements (${n} so far)` : ''
+      return false
+    }
     const v = n >= BURST_ELEMENTS ? this.burstVerdict() : 'tone'
     if (v === 'fsk') {
       this.fskSeenMs = this.timeMs
-      if (this.cfg.rejectRtty) return false
+      if (this.cfg.rejectRtty) {
+        this.holdReason = 'RTTY on this pitch'
+        return false
+      }
     }
-    if (!this.cfg.squelch || this.signalPresent) return true
+    if (!this.cfg.squelch || this.signalPresent) {
+      this.holdReason = ''
+      return true
+    }
     // The histogram's two-mode test is blind when the window holds three
     // levels — band noise, a station between overs, and the operator's own
     // sidetone well above both — so a burst also passes on its own strength:
     // marks this far over the noise scale are not something Rayleigh noise
     // produces (P = e^(−k²/2) per sample, 10⁻¹⁴ at 8 σ), provided they are a
     // tone and not the whole band getting louder.
-    return v === 'tone' && this.sigma > 0 && median(this.burstLevels) >= this.sigma * STRONG_BURST_SIGMA
+    const level = median(this.burstLevels)
+    if (v !== 'tone') {
+      const db = 20 * Math.log10(Math.max(level, 1e-9) / Math.max(median(this.burstSides), 1e-9))
+      this.holdReason = `broadband: only ${db.toFixed(0)} dB louder on the pitch than 170 Hz away (needs 10)`
+      return false
+    }
+    const over = this.sigma > 0 ? level / this.sigma : 0
+    if (over < STRONG_BURST_SIGMA) {
+      this.holdReason = `no transmission seen in the level history, and marks only ${(20 * Math.log10(Math.max(over, 1e-9))).toFixed(0)} dB over the noise (needs ${(20 * Math.log10(STRONG_BURST_SIGMA)).toFixed(0)})`
+      return false
+    }
+    this.holdReason = ''
+    return true
   }
 
   /**
@@ -1558,7 +1584,8 @@ export class CwDecoder {
       signalPresent: this.signalPresent,
       confidence: this.confidence,
       fsk: this.timeMs - this.fskSeenMs < FSK_HOLD_MS,
-      decoding: this.live
+      decoding: this.live,
+      hold: this.live || !this.burstMarks.length ? '' : this.holdReason
     }
   }
 }

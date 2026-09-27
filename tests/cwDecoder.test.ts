@@ -815,15 +815,15 @@ describe('real Yaesu FT-991A band recordings', () => {
  */
 describe('real Kenwood TS-450S recordings', () => {
   const dir = join(__dirname, 'fixtures', 'ts450s')
-  const FILES = ['ts450s-kr4nzn-calls.wav', 'ts450s-own-cq.wav', 'ts450s-rtty-pp5kp.wav', 'ts450s-static.wav']
+  const FILES = ['ts450s-kr4nzn-calls.wav', 'ts450s-narrow-filter-cq.wav', 'ts450s-own-cq.wav', 'ts450s-rtty-pp5kp.wav', 'ts450s-static.wav']
 
-  function decodeTake(file: string, centerHz: number) {
+  function decodeTake(file: string, centerHz: number, bandwidthHz?: number) {
     const { samples, sampleRate } = decodeWav16(readFileSync(join(dir, file)).buffer as ArrayBuffer)
     expect(sampleRate).toBe(8000)
     let text = ''
     const chars: string[] = []
     let fsk = false
-    const decoder = new CwDecoder({ sampleRate, centerHz }, {
+    const decoder = new CwDecoder({ sampleRate, centerHz, ...(bandwidthHz ? { bandwidthHz } : {}) }, {
       onCharacter: ch => { text += ch; chars.push(ch) },
       onWordGap: () => { text += ' ' }
     })
@@ -851,6 +851,18 @@ describe('real Kenwood TS-450S recordings', () => {
     const { chars, fsk } = decodeTake('ts450s-rtty-pp5kp.wav', 635)
     expect(fsk).toBe(true)
     expect(chars.length).toBeLessThanOrEqual(10)
+  })
+
+  it('copies a sidetone only 8 dB over the hiss of a narrow rig filter once the detector is narrowed', () => {
+    // The rig's ~150 Hz CW filter piles the band hiss into the same slot as the
+    // 885 Hz sidetone, which stands only ~8 dB over it — under the 11 dB the
+    // no-signal-yet gate asks for at the default 100 Hz. At ~17 WPM a 40 Hz
+    // detector keeps all of the tone and lets in 40 % of the hiss. (The
+    // decoder does not yet narrow itself to the sender's speed: at 100 Hz this
+    // take prints nothing, which is the case that work has to fix.)
+    expect(decodeTake('ts450s-narrow-filter-cq.wav', 885).chars).toEqual([])
+    const { text } = decodeTake('ts450s-narrow-filter-cq.wav', 885, 40)
+    expect(text.replace(/\s/g, ''), text).toContain('KR4NZN')
   })
 
   it('prints nothing from a minute of static', () => {

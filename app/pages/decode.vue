@@ -559,6 +559,13 @@ function matchRigPitch() {
               </UButton>
             </div>
           </div>
+          <p
+            v-if="dec.listening.value && m.hold && !m.fsk"
+            class="mb-2 font-mono text-[11px] leading-snug text-amber-300/80"
+            role="status"
+          >
+            Holding back, not printed yet — {{ m.hold }}
+          </p>
           <div
             v-if="m.fsk && dec.listening.value"
             class="mb-2 flex gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm leading-snug text-amber-200"
@@ -686,15 +693,15 @@ function matchRigPitch() {
             </div>
             <USlider v-model="s.monitorLevel" :min="0" :max="2" :step="0.05" :disabled="!monitorOn" class="mt-2" />
             <div class="mt-2.5 flex items-center justify-between gap-3">
-              <label class="flex items-center gap-2 text-sm" :class="monitorOn ? '' : 'opacity-50'">
-                <USwitch v-model="s.monitorAgc" size="sm" :disabled="!monitorOn" />
+              <label class="flex items-center gap-2 text-sm" title="Evens out loud sidetone and quiet receive audio — in the headphone monitor and in recordings. The decoder never hears it. Leave it off to record the rig's own levels.">
+                <USwitch v-model="s.monitorAgc" size="sm" />
                 <span class="flex items-center gap-1.5">
                   <UIcon name="i-lucide-audio-lines" class="size-4 text-zinc-400" />
-                  Level the volume
+                  Level the volume <span class="text-zinc-500">(monitor &amp; recordings)</span>
                 </span>
               </label>
               <span
-                v-if="s.monitorAgc && monitorOn && dec.listening.value"
+                v-if="s.monitorAgc && dec.listening.value"
                 class="font-mono text-xs text-zinc-400"
                 title="Gain the leveller is applying right now"
               >AGC {{ agcDb }} dB</span>
