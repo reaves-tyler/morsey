@@ -92,7 +92,13 @@ export default defineNuxtConfig({
   nitro: {
     prerender: {
       crawlLinks: true,
-      routes: ['/']
+      routes: ['/'],
+      // Nuxt adds every page to the prerender list as /learn while the crawler
+      // finds /learn/ through the trailing-slash links: both render to
+      // learn/index.html at once, and whichever write finishes second leaves
+      // the tail of the longer one behind (a stray "/html>" printed under the
+      // footer). Only the canonical, slashed spelling is rendered.
+      ignore: [(path: string) => path !== '/' && !path.endsWith('/') && !/\.[a-z0-9]+(\?|$)/i.test(path)]
     }
   },
   pwa: {

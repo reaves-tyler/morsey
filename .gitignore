@@ -13,5 +13,9 @@ __pycache__
 
 # raw decode-page recordings: full-length 48 kHz takes and screenshots, kept
 # locally to cut test fixtures from. The committed fixtures are the trimmed
-# 8 kHz clips in tests/fixtures/ft991a/.
+# 8 kHz clips in tests/fixtures/ft991a/ and tests/fixtures/ts450s/
+# (scripts/cut-take.ts).
 tests/fixtures/Yaesu-FT-991A/
+tests/fixtures/Kenwood-TS-450S/
+# Windows download markers (files copied in from a browser download)
+*:Zone.Identifier

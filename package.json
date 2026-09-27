@@ -14,6 +14,7 @@
     "test": "vitest run",
     "postinstall": "nuxt prepare",
     "samples": "node scripts/gen-cw-samples.ts",
+    "bench": "node scripts/cw-bench.ts",
     "og": "node scripts/gen-og-image.mjs"
   },
   "devDependencies": {

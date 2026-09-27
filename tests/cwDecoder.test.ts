@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { CwDecoder, MAX_WPM, MIN_WPM, charForPattern, PATTERN_TO_CHAR, type CwDecoderConfig } from '../app/utils/cwDecoder'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { renderCw, noiseRmsForSnr, encodeWav16, decodeWav16, SAMPLE_PRESETS, type CwSynthOptions } from '../app/utils/cwSynth'
+import { renderCw, renderRtty, noiseRmsForSnr, encodeWav16, decodeWav16, characterEndTimes, ITU_CHANNELS, SAMPLE_PRESETS, type CwSynthOptions } from '../app/utils/cwSynth'
 import { MORSE } from '../app/utils/morse'
 
 /**
@@ -93,14 +93,33 @@ describe('clean machine-sent code', () => {
     expect(Math.abs(state.wpm - wpm) / wpm).toBeLessThan(0.1)
   })
 
-  it.each([8, 12])('re-fits to %i WPM from a 20 WPM prior within the first word', (wpm) => {
-    // A prior this far off can cost the first character (its intra-character
-    // gap already exceeds the old letter boundary); everything after the
-    // clusters re-fit must be exact.
+  it.each([8, 12])('re-fits to %i WPM from a 20 WPM prior before printing the first character', (wpm) => {
+    // The burst is held until it passes the squelch and then decoded with the
+    // timing fitted to its own marks, so a prior this far off no longer costs
+    // the first character.
     const { text, state } = decodeText({ text: 'PARIS PARIS CODEX', wpm })
-    expect(text.endsWith('PARIS CODEX')).toBe(true)
-    expect(text.replace(/\s/g, '').length).toBeLessThanOrEqual('PARISPARISCODEX'.length + 1)
+    expect(text).toBe('PARIS PARIS CODEX')
     expect(Math.abs(state.wpm - wpm) / wpm).toBeLessThan(0.1)
+  })
+
+  it('starts on a 40 WPM station from a 10 WPM prior', () => {
+    // The shortest believable mark used to scale with the prior (0.35 × 120 ms),
+    // which threw away every 30 ms dit as noise — so the estimate never saw a
+    // dit and never came down to the sender's speed.
+    const { text, state } = decodeText({ text: 'HELLO WORLD', wpm: 40 }, { initialWpm: 10 })
+    expect(text).toBe('HELLO WORLD')
+    expect(Math.abs(state.wpm - 40) / 40).toBeLessThan(0.1)
+  })
+
+  it('reads the first letters of an over at its own speed, not the last station\'s', () => {
+    // a 30 WPM station, a pause, then a 14 WPM one: the second over's first
+    // characters are decoded after its burst has shown its own timing
+    const fast = renderCw({ sampleRate: FS, text: 'TU 5NN TEST', wpm: 30, tailSec: 3 })
+    const slow = renderCw({ sampleRate: FS, text: 'CQ CQ DE W1AW', wpm: 14, leadInSec: 0 })
+    const all = new Float32Array(fast.samples.length + slow.samples.length)
+    all.set(fast.samples)
+    all.set(slow.samples, fast.samples.length)
+    expect(decodeAudio(all).text).toBe('TU 5NN TEST CQ CQ DE W1AW')
   })
 
   it('recovers from a badly wrong speed prior within the first word', () => {
@@ -201,6 +220,27 @@ describe('spacing styles', () => {
     expect(text.endsWith('WORLD THIS IS FARNSWORTH'), `20/${effectiveWpm}: "${text}"`).toBe(true)
   })
 
+  it('decodes a straight-key novice: long element gaps, very long letter gaps', () => {
+    // The fist measured off the TS-450S: 17 WPM dits, 1.4 dits between the
+    // elements of a letter, 10 or more between letters. The gap inside a
+    // letter is measured, not assumed to be a dit, so no letter is split; and
+    // one-letter "words" in a row are recognised as this fist's letter spacing.
+    const want = 'CQ CQ CQ DE KR4NZN KR4NZN K'
+    const { text } = decodeText({ text: want, wpm: 17, jitter: 0.15, weight: 3.1, spacing: { element: 1.4, letter: 3.5, word: 2 }, snrDb: 20, seed: 12 })
+    expect(text.replace(/\s/g, '')).toBe(want.replace(/\s/g, ''))
+    expect(text).toContain('KR4NZNKR4NZN')
+  })
+
+  it('does not split a letter whose element gap is near the letter boundary', () => {
+    // A key-down still inside the noise blanker's hold ends the silence where
+    // it began; measuring on past it used to flush the letter at the boundary.
+    const want = 'KR4NZN 5NN'
+    for (const seed of [1, 2, 3, 4, 5]) {
+      const { text } = decodeText({ text: want, wpm: 18, jitter: 0.2, spacing: { element: 1.5, letter: 1.4 }, snrDb: 25, seed })
+      expect(text.replace(/\s/g, ''), `seed ${seed}: "${text}"`).toBe('KR4NZN5NN')
+    }
+  })
+
   it('decodes a light fist (2.5:1 weight)', () => {
     const want = 'CQ CQ DE N0CALL K'
     const { text } = decodeText({ text: want, wpm: 18, weight: 2.5 })
@@ -275,6 +315,26 @@ describe('band conditions', () => {
     expect(narrow.text).toBe(want)
   })
 
+  it.each([
+    ['good', 0.95],
+    ['moderate', 0.88],
+    ['poor', 0.78]
+  ] as const)('copies through ITU-R F.1487 %s multipath fading at 15 dB (mean over six paths ≥ %d)', (channel, floor) => {
+    // Rayleigh fading is luck: one seed's path fades through a callsign and
+    // another's does not, so the bar is the mean over several. The peak
+    // follows three times faster inside a burst that passed the squelch;
+    // before that this was 86 % moderate and 83 % poor on a single path.
+    // (The 10 Hz "flutter" channel fades inside a dit and is not copyable
+    // this way — a known limit, like auroral CW is to the ear.)
+    const want = 'KR4NZN DE W1ABC W1ABC TNX CALL UR RST 579 579 NAME BOB BOB QTH OHIO HW? KR4NZN DE W1ABC KN'
+    let sum = 0
+    for (let seed = 1; seed <= 6; seed++) {
+      const { text } = decodeText({ text: want, wpm: 25, snrDb: 15, fading: ITU_CHANNELS[channel], seed, amplitude: 0.3 })
+      sum += accuracy(text.replace(/\s/g, ''), want.replace(/\s/g, ''))
+    }
+    expect(sum / 6).toBeGreaterThanOrEqual(floor)
+  })
+
   it('tolerates hard keying (no envelope shaping = key clicks)', () => {
     const want = 'CLICKY KEYING TEST'
     const { text } = decodeText({ text: want, wpm: 20, riseMs: 0, snrDb: 20, seed: 27 })
@@ -337,6 +397,109 @@ describe('squelch and thresholds', () => {
   it('lockSpeed freezes the timing estimate', () => {
     const { state } = decodeText({ text: 'PARIS PARIS', wpm: 10 }, { initialWpm: 20, lockSpeed: true })
     expect(state.wpm).toBeCloseTo(20, 5)
+  })
+})
+
+describe('not CW', () => {
+  it('prints nothing from RTTY and says it is RTTY', () => {
+    // 45.45 Bd, 170 Hz shift: through a narrow filter one tone of it is a
+    // carrier keyed in 22 ms steps — "very fast machine CW" to the ear
+    const { samples } = renderRtty({ text: 'CQ PP5KP PP5KP WW\nK7JQ TU PP5KP WW 599 11\nCQ PP5KP PP5KP WW\n', markHz: 700, snrDb: 15, sampleRate: FS, leadInSec: 2, tailSec: 1 })
+    let fsk = false
+    let text = ''
+    const decoder = new CwDecoder({ sampleRate: FS }, { onCharacter: ch => { text += ch } })
+    for (let i = 0; i < samples.length; i += 512) {
+      decoder.process(samples.subarray(i, i + 512))
+      fsk ||= decoder.getState().fsk
+    }
+    decoder.flush()
+    expect(text).toBe('')
+    expect(fsk).toBe(true)
+  })
+
+  it.each([700, 870])('prints nothing from RTTY with the pitch on the space tone too (%i Hz)', (centerHz) => {
+    const { samples } = renderRtty({ text: 'CQ TEST HI3LT HI3LT\n', markHz: 870, snrDb: 20, sampleRate: FS, leadInSec: 2 })
+    expect(decodeAudio(samples, { centerHz }).text).toBe('')
+  })
+
+  it.each([44100, 48000])('recognises RTTY through the page\'s band-pass pre-filter at %i Hz', (rate) => {
+    // The browser keys the detector on band-passed audio (Web Audio's biquad,
+    // Q 5 at 700 Hz, which takes ~9 dB off a tone 170 Hz away) and hands the
+    // side detectors the raw input. Element levels have to be read over each
+    // element's settled middle for the partner tone not to smear into our
+    // 22 ms "marks" — before that this printed junk at 44.1 kHz only.
+    const { samples } = renderRtty({ text: 'CQ PP5KP PP5KP WW\nK7JQ TU PP5KP WW 599 11\n', markHz: 700, snrDb: 15, sampleRate: rate, leadInSec: 2 })
+    const w0 = (2 * Math.PI * 700) / rate
+    const alpha = Math.sin(w0) / (2 * 5)
+    const filtered = new Float32Array(samples.length)
+    let x1 = 0; let x2 = 0; let y1 = 0; let y2 = 0
+    for (let i = 0; i < samples.length; i++) {
+      const x = samples[i]!
+      const y = (alpha * x - alpha * x2 + 2 * Math.cos(w0) * y1 - (1 - alpha) * y2) / (1 + alpha)
+      x2 = x1; x1 = x; y2 = y1; y1 = y
+      filtered[i] = y
+    }
+    let text = ''
+    const decoder = new CwDecoder({ sampleRate: rate }, { onCharacter: ch => { text += ch } })
+    for (let i = 0; i < samples.length; i += 1024) decoder.process(filtered.subarray(i, i + 1024), samples.subarray(i, i + 1024))
+    decoder.flush()
+    expect(text).toBe('')
+  })
+
+  it('does not take CW with a station 170 Hz away for RTTY', () => {
+    const want = 'CQ CQ DE W1AW W1AW K'
+    const { text, state } = decodeText({ text: want, wpm: 22, snrDb: 20, qrm: { offsetHz: 170, level: 0.8, wpm: 28, text: 'TEST DL1ABC' }, seed: 5 }, { bandwidthHz: 60 })
+    expect(text).toBe(want)
+    expect(state.fsk).toBe(false)
+  })
+})
+
+describe('operator trims', () => {
+  it('are neutral by default', () => {
+    const want = 'CQ CQ DE W1AW K'
+    const opts = { text: want, wpm: 20, snrDb: 15, seed: 31 }
+    expect(decodeText(opts).text).toBe(decodeText(opts, { thresholdOffsetDb: 0, letterBreak: 1, wordBreak: 1, squelch: true, rejectRtty: true, fadeFollowMs: 40 }).text)
+  })
+
+  it('threshold offset moves the gate: raised above a signal, nothing keys', () => {
+    const opts = { text: 'CQ CQ DE W1AW K', wpm: 20, snrDb: 10, seed: 32 }
+    expect(decodeText(opts).text).toBe('CQ CQ DE W1AW K')
+    const up = decodeText(opts, { thresholdOffsetDb: 30 })
+    expect(up.text).toBe('')
+    expect(up.state.threshold).toBeGreaterThan(decodeText(opts).state.threshold * 10)
+  })
+
+  it('letter break separates a sender who crowds letters together', () => {
+    // 1.3-dit gaps inside letters and under 2 between them: too close for the
+    // automatic boundary to find, so letters run together until the operator
+    // moves the break left
+    const want = 'KR4NZN DE W1ABC'
+    const opts = { text: want, wpm: 20, jitter: 0.1, spacing: { element: 1.3, letter: 0.65 }, snrDb: 30, seed: 33 }
+    expect(decodeText(opts).text).not.toBe(want)
+    expect(decodeText(opts, { letterBreak: 0.85 }).text).toBe(want)
+  })
+
+  it('word break joins letters a wide fist spaces out like words', () => {
+    const want = 'CQ CQ DE KR4NZN'
+    const opts = { text: want, wpm: 18, spacing: { letter: 2.2 }, snrDb: 30, seed: 34 }
+    const loose = decodeText(opts).text
+    const joined = decodeText(opts, { wordBreak: 1.6 }).text
+    expect(joined.split(' ').length).toBeLessThan(loose.split(' ').length)
+    expect(joined.replace(/\s/g, '')).toBe(want.replace(/\s/g, ''))
+  })
+
+  it('squelch off prints a lone letter the squelch holds back', () => {
+    // three elements, then silence: under the four-element rule it is dropped
+    const opts = { text: 'S', wpm: 20, snrDb: 30, seed: 35, tailSec: 3 }
+    expect(decodeText(opts).text).toBe('')
+    expect(decodeText(opts, { squelch: false }).text).toBe('S')
+  })
+
+  it('RTTY rejection can be switched off (it is still recognised)', () => {
+    const { samples } = renderRtty({ text: 'CQ PP5KP PP5KP WW\n', markHz: 700, snrDb: 20, sampleRate: FS, leadInSec: 2 })
+    const off = decodeAudio(samples, { rejectRtty: false })
+    expect(off.text.length).toBeGreaterThan(0)
+    expect(decodeAudio(samples).text).toBe('')
   })
 })
 
@@ -449,6 +612,36 @@ describe('synthesizer', () => {
     const signalRms = 0.5 / Math.SQRT2
     expect(sigma * Math.sqrt(2500 / 4000)).toBeCloseTo(signalRms, 6)
     expect(noiseRmsForSnr(Infinity, 0.5, FS)).toBe(0)
+  })
+
+  it('fades like the ionosphere: Rayleigh taps at the stated average power', () => {
+    // a steady carrier through the ITU "poor" channel: the average power is
+    // kept, and it spends about 10 % of the time more than 10 dB down, as a
+    // Rayleigh envelope must (P(|h|² < 0.1) = 1 − e^(−0.1))
+    const plain = renderCw({ sampleRate: FS, text: 'T', wpm: 0.2, amplitude: 0.3, leadInSec: 0, tailSec: 0 })
+    const faded = renderCw({ sampleRate: FS, text: 'T', wpm: 0.2, amplitude: 0.3, leadInSec: 0, tailSec: 0, fading: { spreadHz: 1, delayMs: 2 }, seed: 9 })
+    const power = (x: Float32Array) => x.reduce((a, v) => a + v * v, 0) / x.length
+    expect(power(faded.samples) / power(plain.samples)).toBeGreaterThan(0.5)
+    expect(power(faded.samples) / power(plain.samples)).toBeLessThan(2)
+    const win = FS / 50
+    let deep = 0
+    let n = 0
+    const ref = 0.3 * 0.3 / 2
+    for (let i = 0; i + win < faded.samples.length; i += win) {
+      const p = power(faded.samples.subarray(i, i + win))
+      if (p < ref * 0.1) deep++
+      n++
+    }
+    expect(deep / n).toBeGreaterThan(0.03)
+    expect(deep / n).toBeLessThan(0.25)
+  })
+
+  it('knows when every character ends (ground truth for latency)', () => {
+    const r = renderCw({ sampleRate: FS, text: 'CQ <KN> K', wpm: 20 })
+    const ends = characterEndTimes('CQ <KN> K', r.segments)
+    expect(ends.map(e => e.ch)).toEqual(['C', 'Q', '<KN>', 'K'])
+    const last = r.segments[r.segments.length - 1]!
+    expect(ends[3]!.end).toBeCloseTo(last.at + last.dur, 6)
   })
 
   it('writes a valid 16-bit WAV header', () => {
@@ -609,6 +802,72 @@ describe('real Yaesu FT-991A band recordings', () => {
     decoder.flush()
     return { text: text.trim(), chars, maxWpm }
   }
+})
+
+/**
+ * Kenwood TS-450S takes from Sept 26–27 2026, recorded with the decode page's
+ * Rec button (through the monitor leveller, so the static between overs is
+ * lifted ~30 dB) and cut to 8 kHz with scripts/cut-take.ts. That weekend was
+ * the CQ WW RTTY DX contest: what sounded like "insanely fast machine CW"
+ * through the rig's CW filter was 45.45 Bd, 170 Hz-shift RTTY — PP5KP and
+ * HI3LT calling CQ, demodulated as Baudot to check. The operator's own
+ * straight-key sidetone at 885 Hz sits on top of it.
+ */
+describe('real Kenwood TS-450S recordings', () => {
+  const dir = join(__dirname, 'fixtures', 'ts450s')
+  const FILES = ['ts450s-kr4nzn-calls.wav', 'ts450s-own-cq.wav', 'ts450s-rtty-pp5kp.wav', 'ts450s-static.wav']
+
+  function decodeTake(file: string, centerHz: number) {
+    const { samples, sampleRate } = decodeWav16(readFileSync(join(dir, file)).buffer as ArrayBuffer)
+    expect(sampleRate).toBe(8000)
+    let text = ''
+    const chars: string[] = []
+    let fsk = false
+    const decoder = new CwDecoder({ sampleRate, centerHz }, {
+      onCharacter: ch => { text += ch; chars.push(ch) },
+      onWordGap: () => { text += ' ' }
+    })
+    for (let i = 0; i < samples.length; i += 1024) {
+      decoder.process(samples.subarray(i, Math.min(samples.length, i + 1024)))
+      fsk ||= decoder.getState().fsk
+    }
+    decoder.flush()
+    return { text: text.trim(), chars, fsk }
+  }
+
+  it('has a test for every WAV in the folder', () => {
+    expect(readdirSync(dir).filter(f => f.endsWith('.wav')).sort()).toEqual(FILES)
+  })
+
+  it('copies the operator\'s own straight-key CQ over the RTTY behind it', () => {
+    // 17 WPM dits, 1.4-dit element gaps, 7–19-dit letter gaps: the letters
+    // must be exact (its word spacing is the sender's and is not asserted)
+    const { text } = decodeTake('ts450s-own-cq.wav', 885)
+    expect(text.replace(/\s/g, '')).toBe('CQKR4NZN')
+  })
+
+  it('prints (almost) nothing from contest RTTY and flags it as RTTY', () => {
+    // the old decoder printed "T*V** NJ4*** NWN EEEA***** E E TX ET O *VEV"
+    const { chars, fsk } = decodeTake('ts450s-rtty-pp5kp.wav', 635)
+    expect(fsk).toBe(true)
+    expect(chars.length).toBeLessThanOrEqual(10)
+  })
+
+  it('prints nothing from a minute of static', () => {
+    expect(decodeTake('ts450s-static.wav', 885).chars).toEqual([])
+  })
+
+  it('copies the call through two minutes of RTTY on the same pitch without spraying junk', () => {
+    // Six attempts at KR4NZN between RTTY overs — some with the sender's own
+    // hesitations in them (a 1.1 s pause inside a K prints T R, as keyed), so
+    // only the clean last one is asserted exactly; the rest is bounded junk.
+    const { text, chars } = decodeTake('ts450s-kr4nzn-calls.wav', 885)
+    expect(text.replace(/\s/g, ''), text).toContain('KR4NZN')
+    expect(text.replace(/\s/g, '').match(/4NZN|4MZN|R4N/g)?.length ?? 0, text).toBeGreaterThanOrEqual(4)
+    const et = chars.filter(c => c === 'E' || c === 'T').length / chars.length
+    expect(et, text).toBeLessThan(0.3)
+    expect(chars.length, text).toBeLessThan(60)
+  })
 })
 
 /**

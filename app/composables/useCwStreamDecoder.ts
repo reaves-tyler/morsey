@@ -65,6 +65,13 @@ export interface DecodeSettings {
   speedAveraging: number
   initialWpm: number
   lockSpeed: boolean
+  /** fine-tuning trims on the automatic decisions (see CwDecoderConfig) */
+  thresholdOffsetDb: number
+  squelch: boolean
+  rejectRtty: boolean
+  letterBreak: number
+  wordBreak: number
+  fadeFollowMs: number
   /** pass the line / aux input and audio files through to the output (headphones) */
   monitor: boolean
   /** pass a live microphone through to the output — off by default (feedback through speakers) */
@@ -112,6 +119,12 @@ function defaultSettings(): DecodeSettings {
     speedAveraging: DEFAULT_DECODER_CONFIG.speedAveraging,
     initialWpm: DEFAULT_DECODER_CONFIG.initialWpm,
     lockSpeed: false,
+    thresholdOffsetDb: DEFAULT_DECODER_CONFIG.thresholdOffsetDb,
+    squelch: DEFAULT_DECODER_CONFIG.squelch,
+    rejectRtty: DEFAULT_DECODER_CONFIG.rejectRtty,
+    letterBreak: DEFAULT_DECODER_CONFIG.letterBreak,
+    wordBreak: DEFAULT_DECODER_CONFIG.wordBreak,
+    fadeFollowMs: DEFAULT_DECODER_CONFIG.fadeFollowMs,
     monitor: true,
     monitorMic: false,
     monitorLevel: 1,
@@ -189,15 +202,24 @@ class PcmForwarder extends AudioWorkletProcessor {
   constructor() {
     super()
     this.buf = new Float32Array(1024)
+    this.side = new Float32Array(1024)
     this.pos = 0
   }
   process(inputs) {
     const ch = inputs[0] && inputs[0][0]
+    // an optional second channel travels alongside (the decoder's unfiltered side feed)
+    const sd = inputs[0] && inputs[0][1]
     if (ch) {
       for (let i = 0; i < ch.length; i++) {
+        this.side[this.pos] = sd ? sd[i] : 0
         this.buf[this.pos++] = ch[i]
         if (this.pos === this.buf.length) {
-          this.port.postMessage(this.buf, [this.buf.buffer])
+          if (sd) {
+            this.port.postMessage({ main: this.buf, side: this.side }, [this.buf.buffer, this.side.buffer])
+            this.side = new Float32Array(1024)
+          } else {
+            this.port.postMessage(this.buf, [this.buf.buffer])
+          }
           this.buf = new Float32Array(1024)
           this.pos = 0
         }
@@ -235,7 +257,7 @@ const latencyMs = ref(0)
 const monitorGainDb = ref(0)
 const meter = ref<CwDecoderState>({
   magnitude: 0, floor: 0, peak: 0, threshold: 0, snrDb: 0, keyed: false,
-  ditMs: 60, dahMs: 180, wpm: 20, letterGapMs: 180, wordGapMs: 420, pattern: '', timeMs: 0, calibrated: false, signalPresent: false, confidence: 1
+  ditMs: 60, dahMs: 180, wpm: 20, elemGapMs: 60, letterGapMs: 180, wordGapMs: 420, pattern: '', timeMs: 0, calibrated: false, signalPresent: false, confidence: 1, fsk: false, decoding: false
 })
 /**
  * Recorder, capturing what the monitor plays (for documenting a session and
@@ -263,6 +285,8 @@ let stream: MediaStream | null = null
 let sourceNode: AudioNode | null = null
 let bufferSource: AudioBufferSourceNode | null = null
 let filterNode: BiquadFilterNode | null = null
+/** joins the decoder's two feeds (keyed audio, raw side audio) into one two-channel input */
+let decoderMerger: ChannelMergerNode | null = null
 let workletNode: AudioWorkletNode | null = null
 let scriptNode: ScriptProcessorNode | null = null
 let recorderNode: AudioNode | null = null
@@ -301,7 +325,13 @@ function toEngineConfig(s: DecodeSettings): Partial<CwDecoderConfig> {
     noiseBlankerMs: s.noiseBlankerMs,
     speedAveraging: s.speedAveraging,
     initialWpm: s.initialWpm,
-    lockSpeed: s.lockSpeed
+    lockSpeed: s.lockSpeed,
+    thresholdOffsetDb: s.thresholdOffsetDb,
+    squelch: s.squelch,
+    rejectRtty: s.rejectRtty,
+    letterBreak: s.letterBreak,
+    wordBreak: s.wordBreak,
+    fadeFollowMs: s.fadeFollowMs
   }
 }
 
@@ -424,12 +454,14 @@ export function useCwStreamDecoder() {
     // the recorder follows the leveller (see the graph at the top), falling
     // back to the raw source only if the worklet could not be built
     if (recorderNode && !agcNode) sourceNode.connect(recorderNode)
+    const into: AudioNode = decoderMerger ?? tap
     if (settings.value.prefilter && filterNode) {
       sourceNode.connect(filterNode)
-      filterNode.connect(tap)
+      filterNode.connect(into, 0, 0)
     } else {
-      sourceNode.connect(tap)
+      sourceNode.connect(into, 0, 0)
     }
+    if (decoderMerger) sourceNode.connect(decoderMerger, 0, 1)
   }
 
   function makeDecoder(sampleRate: number) {
@@ -469,19 +501,38 @@ export function useCwStreamDecoder() {
     }
   }
 
-  /** A node that hands every 1024-sample PCM block to `onBlock` (worklet, with ScriptProcessor fallback). */
-  async function buildTap(audio: AudioContext, onBlock: (block: Float32Array) => void): Promise<AudioNode> {
+  /**
+   * A node that hands every 1024-sample PCM block to `onBlock` (worklet, with
+   * ScriptProcessor fallback). With `channels: 2` the second input channel is
+   * handed over alongside the first, sample-aligned.
+   */
+  async function buildTap(audio: AudioContext, onBlock: (block: Float32Array, side?: Float32Array) => void, channels: 1 | 2 = 1): Promise<AudioNode> {
     if (await loadWorklet(audio)) {
       try {
-        const node = new AudioWorkletNode(audio, 'morsey-pcm-forwarder', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1 })
-        node.port.onmessage = (e: MessageEvent<Float32Array>) => onBlock(e.data)
+        const node = new AudioWorkletNode(audio, 'morsey-pcm-forwarder', {
+          numberOfInputs: 1,
+          numberOfOutputs: 1,
+          channelCount: channels,
+          channelCountMode: 'explicit',
+          channelInterpretation: 'discrete'
+        })
+        node.port.onmessage = (e: MessageEvent<Float32Array | { main: Float32Array; side: Float32Array }>) => {
+          const d = e.data
+          if (d instanceof Float32Array) onBlock(d)
+          else onBlock(d.main, d.side)
+        }
         return node
       } catch {
         // fall through to ScriptProcessor (older Safari, or CSP blocking blob workers)
       }
     }
-    const node = audio.createScriptProcessor(1024, 1, 1)
-    node.onaudioprocess = (e) => onBlock(e.inputBuffer.getChannelData(0))
+    const node = audio.createScriptProcessor(1024, channels, 1)
+    node.channelCountMode = 'explicit'
+    node.channelInterpretation = 'discrete'
+    node.onaudioprocess = (e) => onBlock(
+      e.inputBuffer.getChannelData(0),
+      channels === 2 && e.inputBuffer.numberOfChannels > 1 ? e.inputBuffer.getChannelData(1) : undefined
+    )
     return node
   }
 
@@ -520,9 +571,14 @@ export function useCwStreamDecoder() {
     // The tap runs whenever the graph does — between runs it carries silence,
     // which must not reach the decoder (it would warm up on nothing and then
     // mistake the real noise floor for signal when the source starts)
-    const tap = await buildTap(audio, (block) => { if (sourceNode) decoder?.process(block) })
+    // Two channels into the decoder: the (optionally pre-filtered) audio its
+    // detector keys on, and the raw input for its 170 Hz side detectors, which
+    // the pre-filter would otherwise blind to the other tone of an RTTY pair
+    const tap = await buildTap(audio, (block, side) => { if (sourceNode) decoder?.process(block, side) }, 2)
     if (tap instanceof AudioWorkletNode) workletNode = tap
     else scriptNode = tap as ScriptProcessorNode
+    decoderMerger = audio.createChannelMerger(2)
+    decoderMerger.connect(tap)
     // Taps must be connected to the destination to be pulled by the graph;
     // their output is silenced so nothing leaks into the speakers.
     sinkGain = audio.createGain()
@@ -881,13 +937,27 @@ export function useCwStreamDecoder() {
     settings.value = { ...defaultSettings(), lineDeviceId, micDeviceId, outputDeviceId, monitor, monitorMic, monitorLevel, monitorAgc }
   }
 
+  /** put the fine-tuning trims back to centre (the tested defaults) */
+  function resetTrims() {
+    const d = defaultSettings()
+    settings.value = {
+      ...settings.value,
+      thresholdOffsetDb: d.thresholdOffsetDb,
+      squelch: d.squelch,
+      rejectRtty: d.rejectRtty,
+      letterBreak: d.letterBreak,
+      wordBreak: d.wordBreak,
+      fadeFollowMs: d.fadeFollowMs
+    }
+  }
+
   return {
     // state
     listening, source, text, pattern, error, devices, outputs, devicesLabelled, suggestedLineDevice, canSelectOutput,
     fileName, playbackProgress, latencyMs, monitorGainDb, meter, elements, settings, report,
     recording, recordingState, recordedSeconds, recordedBytes,
     // actions
-    start, stop, clear, loadFile, refreshDevices, requestDevicePermission, resetTiming, resetLevels, resetSettings, spectrum, spectrumBins,
+    start, stop, clear, loadFile, refreshDevices, requestDevicePermission, resetTiming, resetLevels, resetSettings, resetTrims, spectrum, spectrumBins,
     startRecording, pauseRecording, exportRecording, discardRecording
   }
 }

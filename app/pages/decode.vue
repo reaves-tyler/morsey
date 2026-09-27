@@ -329,6 +329,13 @@ const strengthText = computed(() => {
   return r.plusDb > 0 ? `S9 +${r.plusDb} dB` : `S${r.s}`
 })
 const prefilterQ = computed(() => Math.min(50, Math.max(5, s.value.centerHz / Math.max(20, s.value.bandwidthHz * 2))).toFixed(0))
+/** the spacing the decoder has measured, in dits — what the letter/word break trims act on */
+const spacingText = computed(() => {
+  const d = m.value.ditMs
+  const f = (ms: number) => (ms / d).toFixed(ms / d < 10 ? 1 : 0)
+  return `inside a letter ${f(m.value.elemGapMs)} · between letters ${f(m.value.letterGapMs)} · between words ${f(m.value.wordGapMs)} dits`
+})
+const signedDb = (v: number) => `${v > 0 ? '+' : v < 0 ? '−' : '±'}${Math.abs(v)} dB`
 
 
 // ---- Terminal ----------------------------------------------------------------------
@@ -450,11 +457,13 @@ function matchRigPitch() {
                     <span
                       v-if="dec.listening.value"
                       class="rounded px-1.5 py-0.5 normal-case tracking-normal"
-                      :class="m.signalPresent ? 'bg-emerald-500/15 text-emerald-400' : 'bg-zinc-800 text-zinc-500'"
-                      :title="m.signalPresent
-                        ? 'A keyed signal is on the frequency: copy is being printed.'
-                        : 'Squelched — the levels in the passband are band noise, not a transmission. Anything the gate catches is held back rather than printed as E and T.'"
-                    >{{ m.signalPresent ? 'Signal' : 'Squelched' }}</span>
+                      :class="m.fsk ? 'bg-amber-500/15 text-amber-300' : m.signalPresent || m.decoding ? 'bg-emerald-500/15 text-emerald-400' : 'bg-zinc-800 text-zinc-500'"
+                      :title="m.fsk
+                        ? 'RTTY on this pitch — two-tone teleprinter, not Morse. Not printed.'
+                        : m.signalPresent || m.decoding
+                          ? 'A keyed signal is on the frequency: copy is being printed.'
+                          : 'Squelched — nothing on the frequency looks like a transmission. Anything the gate catches is held back rather than printed as E and T.'"
+                    >{{ m.fsk ? 'RTTY' : m.signalPresent || m.decoding ? 'Signal' : 'Squelched' }}</span>
                   </span>
                   <span class="flex gap-3 normal-case tracking-normal">
                     <span class="text-zinc-500">▮ floor</span>
@@ -549,6 +558,17 @@ function matchRigPitch() {
                 Clear
               </UButton>
             </div>
+          </div>
+          <div
+            v-if="m.fsk && dec.listening.value"
+            class="mb-2 flex gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm leading-snug text-amber-200"
+            role="status"
+          >
+            <UIcon name="i-lucide-radio-tower" class="mt-0.5 size-4 shrink-0 text-amber-400" />
+            <span>
+              <span class="font-semibold">RTTY on this pitch — not Morse.</span>
+              Radioteletype is two tones 170 Hz apart switching 45 times a second; through a narrow CW filter one tone of it sounds like very fast machine code. Morsey decodes CW only, so it is not printed. RTTY contests spread across the band's CW end on contest weekends — tune to a steadier, slower keyed tone.
+            </span>
           </div>
           <div
             ref="terminal"
@@ -778,7 +798,7 @@ function matchRigPitch() {
                 <span>Centre pitch</span>
                 <span class="font-mono text-emerald-400">{{ s.centerHz }} Hz</span>
               </div>
-              <USlider v-model="s.centerHz" :min="400" :max="1000" :step="10" />
+              <USlider v-model="s.centerHz" :min="300" :max="1500" :step="10" />
             </div>
             <div>
               <div class="mb-1 flex items-center justify-between text-sm">
@@ -873,14 +893,78 @@ function matchRigPitch() {
             </div>
           </div>
         </UCard>
+
+        <!-- Operator trims on the automatic decisions: the decoder still measures everything, these move where it decides -->
+        <UCard>
+          <div class="mb-1 flex items-center justify-between">
+            <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Fine tuning</div>
+            <UButton size="xs" variant="ghost" color="neutral" icon="i-lucide-undo-2" @click="dec.resetTrims()">Centre all</UButton>
+          </div>
+          <p class="mb-4 text-xs leading-snug text-zinc-500">
+            Everything is still measured automatically — these move where the decoder draws its lines. Centred is the tested default; change one at a time while watching the text.
+          </p>
+          <div class="space-y-4">
+            <div v-if="s.thresholdMode === 'auto'">
+              <div class="mb-1 flex items-center justify-between text-sm">
+                <span>Threshold</span>
+                <span class="font-mono text-amber-400">{{ signedDb(s.thresholdOffsetDb) }}</span>
+              </div>
+              <USlider v-model="s.thresholdOffsetDb" :min="-12" :max="12" :step="1" />
+              <div class="mt-0.5 flex justify-between font-mono text-[10px] text-zinc-600"><span>weak / fading</span><span>noisy band</span></div>
+              <p class="mt-1 text-xs leading-snug text-zinc-500">
+                Moves the amber mark on the meter. Down catches elements that fade under the gate; up stops static crashes keying it.
+              </p>
+            </div>
+            <div>
+              <div class="mb-1 flex items-center justify-between text-sm">
+                <span>Fade following</span>
+                <span class="font-mono text-emerald-400">{{ s.fadeFollowMs }} ms</span>
+              </div>
+              <USlider v-model="s.fadeFollowMs" :min="15" :max="300" :step="5" />
+              <div class="mt-0.5 flex justify-between font-mono text-[10px] text-zinc-600"><span>fast QSB</span><span>steady signal</span></div>
+              <p class="mt-1 text-xs leading-snug text-zinc-500">How quickly the tracked signal level follows a fade during a transmission.</p>
+            </div>
+            <div>
+              <div class="mb-1 flex items-center justify-between text-sm">
+                <span>Letter break</span>
+                <span class="font-mono text-emerald-400">×{{ s.letterBreak.toFixed(2) }}</span>
+              </div>
+              <USlider v-model="s.letterBreak" :min="0.6" :max="1.8" :step="0.05" />
+              <div class="mt-0.5 flex justify-between font-mono text-[10px] text-zinc-600"><span>letters run together</span><span>letters split apart</span></div>
+              <p class="mt-1 text-xs leading-snug text-zinc-500">If a 4 prints as I U or a C as T A, the sender pauses inside letters — move right.</p>
+            </div>
+            <div>
+              <div class="mb-1 flex items-center justify-between text-sm">
+                <span>Word break</span>
+                <span class="font-mono text-emerald-400">×{{ s.wordBreak.toFixed(2) }}</span>
+              </div>
+              <USlider v-model="s.wordBreak" :min="0.6" :max="2.5" :step="0.05" />
+              <div class="mt-0.5 flex justify-between font-mono text-[10px] text-zinc-600"><span>words run together</span><span>C Q C Q</span></div>
+              <p class="mt-1 text-xs leading-snug text-zinc-500">If every letter prints as its own word, move right.</p>
+            </div>
+            <p class="font-mono text-[11px] leading-snug text-zinc-500">Measured spacing: {{ spacingText }}</p>
+            <div class="space-y-3 border-t border-zinc-800 pt-3">
+              <div class="flex items-center justify-between gap-3 text-sm">
+                <span>Squelch <span class="text-zinc-500">— print only what looks like a transmission</span></span>
+                <USwitch v-model="s.squelch" />
+              </div>
+              <p v-if="!s.squelch" class="-mt-1 text-xs leading-snug text-amber-300/80">Off: everything that keys the gate is printed, noise included — for very weak signals the squelch never opens for.</p>
+              <div class="flex items-center justify-between gap-3 text-sm">
+                <span>Ignore RTTY <span class="text-zinc-500">— don't print radioteletype as Morse</span></span>
+                <USwitch v-model="s.rejectRtty" />
+              </div>
+            </div>
+          </div>
+        </UCard>
       </div>
     </div>
 
     <p class="text-xs leading-relaxed text-zinc-600">
       How it works: the audio is mixed to the centre pitch and integrated over a window set by the bandwidth (a sliding single-bin
-      Goertzel detector, as in the QCX/QMX), the envelope is keyed against an adaptive noise-floor/peak threshold, and element
-      lengths are clustered into dits and dahs so the speed tracks the sender. Letters print as soon as the gap after them exceeds
-      the letter boundary. Unknown patterns print as a dot.
+      Goertzel detector, as in the QCX/QMX), the envelope is keyed against an adaptive noise-floor/peak threshold, and each burst of
+      keying is held until it looks like a transmission — a tone, not the whole band getting louder, and not the two alternating
+      tones of RTTY — then decoded from its start at the speed and spacing measured from it. After that letters print as soon as the
+      gap after them passes the letter boundary. Unknown patterns print as a dot.
     </p>
   </div>
 </template>

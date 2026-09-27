@@ -1,4 +1,4 @@
-import { morseTimings, textToSchedule, type MorseTimings, type ToneSegment } from './morse.ts'
+import { MORSE, morseTimings, textToSchedule, type MorseTimings, type ToneSegment } from './morse.ts'
 
 /**
  * Deterministic CW band-audio synthesizer — the test fixture and sample
@@ -15,6 +15,16 @@ import { morseTimings, textToSchedule, type MorseTimings, type ToneSegment } fro
  *  - keying envelope rise/fall (5 ms is the usual rig shaping; 0 = hard keying,
  *    which produces key clicks the detector must tolerate)
  *  - frequency drift and a pitch offset from the decoder's centre
+ *  - HF multipath fading: the ITU-R F.1487 (Watterson) channel — independent
+ *    Rayleigh-faded paths with a Gaussian Doppler spectrum and a delay spread —
+ *    which is what the ionosphere does to a carrier, as opposed to the tidy
+ *    sinusoid of `qsb`
+ *  - real band noise: any recorded noise bed in place of white noise, scaled
+ *    to the same SNR convention
+ *
+ * `renderRtty` renders the other thing on the CW bands that sounds like very
+ * fast code through a narrow filter — 45.45 baud, 170 Hz-shift Baudot — so the
+ * decoder can be tested on what it must *not* print.
  */
 
 export interface CwSynthOptions {
@@ -31,12 +41,26 @@ export interface CwSynthOptions {
   snrDb?: number
   /** QSB: fading depth 0..1 and rate in Hz */
   qsb?: { depth: number; rateHz: number }
-  /** QRM: an interfering station */
-  qrm?: { offsetHz: number; level: number; text?: string; wpm?: number }
+  /** QRM: one or more interfering stations (level relative to the wanted signal) */
+  qrm?: QrmStation | QrmStation[]
   /** dah length in dits (3 = standard; heavy fists 3.5–4) */
   weight?: number
   /** random timing jitter as a fraction of each element/gap (0.15 = sloppy hand) */
   jitter?: number
+  /**
+   * Spacing multipliers on the standard 1 / 3 / 7-dit gaps — a straight-key
+   * novice leaves 1.3–1.6 dits between the elements of a letter and 5–15
+   * between letters, which is the fist the letter-boundary logic has to follow.
+   */
+  spacing?: { element?: number; letter?: number; word?: number }
+  /** HF multipath fading (ITU-R F.1487 / Watterson); applied to the wanted signal */
+  fading?: FadingChannel
+  /**
+   * Recorded noise bed used instead of white noise (same sample rate), scaled
+   * so `snrDb` keeps its meaning; read from `noiseOffset` samples in, looping.
+   */
+  noise?: Float32Array
+  noiseOffset?: number
   /** keying envelope rise/fall in ms */
   riseMs?: number
   /** linear frequency drift over the whole clip, Hz */
@@ -46,6 +70,36 @@ export interface CwSynthOptions {
   tailSec?: number
   /** PRNG seed */
   seed?: number
+}
+
+export interface QrmStation {
+  offsetHz: number
+  level: number
+  text?: string
+  wpm?: number
+  /** seconds of silence before the interferer starts (default 0.1) */
+  startSec?: number
+}
+
+/**
+ * ITU-R F.1487 channel conditions are quoted as a frequency spread (2σ of the
+ * Gaussian Doppler spectrum) and a differential delay: "good" 0.1 Hz / 0.5 ms,
+ * "moderate" 0.5 Hz / 1 ms, "poor" 1 Hz / 2 ms, "flutter" (auroral) 10 Hz.
+ */
+export interface FadingChannel {
+  /** frequency spread 2σ, Hz */
+  spreadHz: number
+  /** differential delay of the second path, ms (0 = a single faded path) */
+  delayMs?: number
+  /** number of equal-power independently faded paths (default 2) */
+  paths?: 1 | 2
+}
+
+export const ITU_CHANNELS: Record<'good' | 'moderate' | 'poor' | 'flutter', FadingChannel> = {
+  good: { spreadHz: 0.1, delayMs: 0.5 },
+  moderate: { spreadHz: 0.5, delayMs: 1 },
+  poor: { spreadHz: 1, delayMs: 2 },
+  flutter: { spreadHz: 10, delayMs: 0.5 }
 }
 
 export interface CwSynthResult {
@@ -81,9 +135,19 @@ export function makeRng(seed: number) {
  * Apply hand-sent character to a machine schedule: dah weight, per-element
  * jitter. Gaps are re-derived so the schedule stays consistent.
  */
-function humanize(text: string, t: MorseTimings, weight: number, jitter: number, rng: ReturnType<typeof makeRng>): { segments: ToneSegment[]; total: number } {
+function humanize(
+  text: string,
+  t: MorseTimings,
+  weight: number,
+  jitter: number,
+  rng: ReturnType<typeof makeRng>,
+  spacing: { element?: number; letter?: number; word?: number } = {}
+): { segments: ToneSegment[]; total: number } {
   const base = textToSchedule(text, t)
-  if (weight === 3 && jitter === 0) return base
+  const se = spacing.element ?? 1
+  const sl = spacing.letter ?? 1
+  const sw = spacing.word ?? 1
+  if (weight === 3 && jitter === 0 && se === 1 && sl === 1 && sw === 1) return base
 
   const segments: ToneSegment[] = []
   let cursor = 0
@@ -95,7 +159,9 @@ function humanize(text: string, t: MorseTimings, weight: number, jitter: number,
     const dur = j(isDah ? t.dit * weight : t.dit)
     if (i > 0) {
       const gap = seg.at - prevEnd
-      cursor += Math.max(t.dit * 0.4, j(gap))
+      // which gap this is, from the machine schedule: element, letter or word
+      const scale = gap > (t.charGap + t.wordGap) / 2 ? sw : gap > (t.elementGap + t.charGap) / 2 ? sl : se
+      cursor += Math.max(t.dit * 0.4, j(gap * scale))
     }
     segments.push({ at: cursor, dur })
     cursor += dur
@@ -114,6 +180,91 @@ export function noiseRmsForSnr(snrDb: number, amplitude: number, sampleRate: num
   return noiseInBand / Math.sqrt(bwFraction)
 }
 
+/**
+ * Add noise of RMS `sigma` (white by default). A recorded bed is scaled to that
+ * RMS so the SNR convention holds — but its *spectrum* is kept, which is the
+ * point: a rig's CW filter peaks real band noise right where the tone is, so
+ * it costs more than white noise at the same quoted SNR.
+ */
+function addNoise(out: Float32Array, sigma: number, sampleRate: number, rng: ReturnType<typeof makeRng>, bed?: Float32Array, offset = 0) {
+  if (!bed || !bed.length) {
+    for (let i = 0; i < out.length; i++) out[i] = out[i]! + sigma * rng.gauss()
+    return
+  }
+  let sum = 0
+  for (const v of bed) sum += v * v
+  const rms = Math.sqrt(sum / bed.length)
+  if (!(rms > 0)) return
+  // `noiseRmsForSnr` assumes white noise across Nyquist; a bed at another
+  // rate would shift the in-band share, so this only holds at the bed's rate
+  void sampleRate
+  const g = sigma / rms
+  for (let i = 0; i < out.length; i++) out[i] = out[i]! + g * bed[(i + offset) % bed.length]!
+}
+
+/**
+ * One Rayleigh-faded path: a complex Gaussian process with a Gaussian Doppler
+ * spectrum of 2σ width `spreadHz`, normalised to RMS `rms`, at audio rate.
+ * Generated at a low control rate and linearly interpolated — the spectrum is
+ * a few Hz wide at most.
+ */
+function rayleighTap(n: number, sampleRate: number, spreadHz: number, rng: ReturnType<typeof makeRng>, rms: number): { re: Float32Array; im: Float32Array } {
+  const re = new Float32Array(n)
+  const im = new Float32Array(n)
+  const ctrlHz = Math.min(400, Math.max(20, 20 * spreadHz))
+  const m = Math.ceil((n / sampleRate) * ctrlHz) + 2
+  const sigmaF = Math.max(1e-3, spreadHz / 2)
+  const sigmaT = (1 / (2 * Math.PI * sigmaF)) * ctrlHz // kernel σ in control samples
+  const half = Math.min(Math.ceil(4 * sigmaT), 4 * m)
+  const kernel = new Float64Array(2 * half + 1)
+  for (let k = -half; k <= half; k++) kernel[k + half] = Math.exp(-(k * k) / (2 * sigmaT * sigmaT))
+  const wr = new Float64Array(m + 2 * half)
+  const wi = new Float64Array(m + 2 * half)
+  for (let i = 0; i < wr.length; i++) { wr[i] = rng.gauss(); wi[i] = rng.gauss() }
+  const cr = new Float64Array(m)
+  const ci = new Float64Array(m)
+  let power = 0
+  for (let i = 0; i < m; i++) {
+    let a = 0
+    let b = 0
+    for (let k = 0; k < kernel.length; k++) { a += kernel[k]! * wr[i + k]!; b += kernel[k]! * wi[i + k]! }
+    cr[i] = a
+    ci[i] = b
+    power += a * a + b * b
+  }
+  const g = rms / Math.sqrt(power / m || 1)
+  for (let i = 0; i < n; i++) {
+    const x = (i / sampleRate) * ctrlHz
+    const i0 = Math.min(m - 2, Math.floor(x))
+    const f = x - i0
+    re[i] = g * (cr[i0]! * (1 - f) + cr[i0 + 1]! * f)
+    im[i] = g * (ci[i0]! * (1 - f) + ci[i0 + 1]! * f)
+  }
+  return { re, im }
+}
+
+/**
+ * When each character of `text` ends in a rendered schedule, in seconds — the
+ * ground truth for measuring how long a decoder takes to print it. Prosigns are
+ * one character; spaces have no entry.
+ */
+export function characterEndTimes(text: string, segments: ToneSegment[]): { ch: string; end: number }[] {
+  const out: { ch: string; end: number }[] = []
+  let seg = 0
+  for (const word of text.trim().toUpperCase().split(/\s+/)) {
+    for (const token of word.match(/<[A-Z]+>|./g) ?? []) {
+      const code = token.startsWith('<')
+        ? token.slice(1, -1).split('').map(l => MORSE[l] ?? '').join('')
+        : MORSE[token] ?? ''
+      if (!code) continue
+      seg += code.length
+      const last = segments[seg - 1]
+      if (last) out.push({ ch: token, end: last.at + last.dur })
+    }
+  }
+  return out
+}
+
 export function renderCw(opts: CwSynthOptions): CwSynthResult {
   const sampleRate = opts.sampleRate ?? 8000
   const wpm = opts.wpm ?? 20
@@ -128,7 +279,7 @@ export function renderCw(opts: CwSynthOptions): CwSynthResult {
   const rng = makeRng(opts.seed ?? 1)
 
   const t = morseTimings(wpm, effectiveWpm)
-  const { segments: raw, total } = humanize(opts.text, t, weight, jitter, rng)
+  const { segments: raw, total } = humanize(opts.text, t, weight, jitter, rng, opts.spacing)
   const segments = raw.map(s => ({ at: s.at + leadIn, dur: s.dur }))
   const duration = leadIn + total + tail
   const n = Math.ceil(duration * sampleRate)
@@ -152,30 +303,53 @@ export function renderCw(opts: CwSynthOptions): CwSynthResult {
   for (const seg of segments) paint(env, seg.at, seg.dur)
   const drift = opts.driftHz ?? 0
   let phase = 0
-  for (let i = 0; i < n; i++) {
-    const f = toneHz + (drift * i) / n
-    phase += (2 * Math.PI * f) / sampleRate
-    let g = amplitude * env[i]!
-    if (opts.qsb && opts.qsb.depth > 0) {
-      const fade = 1 - opts.qsb.depth * (0.5 + 0.5 * Math.sin(2 * Math.PI * opts.qsb.rateHz * (i / sampleRate) - Math.PI / 2))
-      g *= fade
+  const qsbGain = (i: number) => opts.qsb && opts.qsb.depth > 0
+    ? 1 - opts.qsb.depth * (0.5 + 0.5 * Math.sin(2 * Math.PI * opts.qsb.rateHz * (i / sampleRate) - Math.PI / 2))
+    : 1
+  if (!opts.fading) {
+    for (let i = 0; i < n; i++) {
+      const f = toneHz + (drift * i) / n
+      phase += (2 * Math.PI * f) / sampleRate
+      out[i] = amplitude * env[i]! * qsbGain(i) * Math.sin(phase)
     }
-    out[i] = g * Math.sin(phase)
+  } else {
+    // Multipath: each path is the same keyed carrier, delayed, times its own
+    // complex Rayleigh tap. Summing them is what fills a gap with the tail of
+    // the previous element (delay spread) and takes whole elements out (fades).
+    const ph = new Float64Array(n)
+    for (let i = 0; i < n; i++) {
+      const f = toneHz + (drift * i) / n
+      phase += (2 * Math.PI * f) / sampleRate
+      ph[i] = phase
+    }
+    const paths = opts.fading.paths ?? 2
+    const delay = Math.round(((opts.fading.delayMs ?? 0) / 1000) * sampleRate)
+    for (let p = 0; p < paths; p++) {
+      const tap = rayleighTap(n, sampleRate, opts.fading.spreadHz, rng, 1 / Math.sqrt(paths))
+      const d = p * delay
+      for (let i = d; i < n; i++) {
+        const k = i - d
+        const a = amplitude * env[k]! * qsbGain(i)
+        if (a === 0) continue
+        // the tap (re, im) scales and rotates the carrier; an unfaded (1, 0) leaves it as sin φ
+        out[i] = out[i]! + a * (tap.re[i]! * Math.sin(ph[k]!) + tap.im[i]! * Math.cos(ph[k]!))
+      }
+    }
   }
 
-  // --- QRM: another station ---
-  if (opts.qrm && opts.qrm.level > 0) {
-    const q = opts.qrm
+  // --- QRM: other stations ---
+  const qrms = opts.qrm ? (Array.isArray(opts.qrm) ? opts.qrm : [opts.qrm]) : []
+  for (const q of qrms) {
+    if (!(q.level > 0)) continue
     const qt = morseTimings(q.wpm ?? 22, q.wpm ?? 22)
     const qText = q.text ?? 'VVV DE QRM QRM'
-    let qsched = textToSchedule(qText, qt)
+    const qsched = textToSchedule(qText, qt)
     // loop the interferer across the whole clip
     const qenv = new Float32Array(n)
-    let offset = 0.1
+    let offset = q.startSec ?? 0.1
     while (offset < duration) {
       for (const seg of qsched.segments) paint(qenv, offset + seg.at, seg.dur)
       offset += qsched.total + qt.wordGap * 2
-      qsched = textToSchedule(qText, qt)
     }
     let qphase = 0
     const qf = toneHz + q.offsetHz
@@ -187,13 +361,11 @@ export function renderCw(opts: CwSynthOptions): CwSynthResult {
 
   // --- noise ---
   const sigma = noiseRmsForSnr(opts.snrDb ?? Infinity, amplitude, sampleRate)
-  if (sigma > 0) {
-    for (let i = 0; i < n; i++) out[i] = out[i]! + sigma * rng.gauss()
-  }
+  if (sigma > 0) addNoise(out, sigma, sampleRate, rng, opts.noise, opts.noiseOffset)
 
   // Keep the mix inside full scale: heavy noise would otherwise clip and the
   // clipping products would swamp the tone. A receiver's AGC does the same.
-  const headroom = amplitude * (1 + (opts.qrm?.level ?? 0)) + 4 * sigma
+  const headroom = amplitude * (1 + qrms.reduce((a, q) => a + q.level, 0)) + 4 * sigma
   if (headroom > 1) {
     const g = 1 / headroom
     for (let i = 0; i < n; i++) out[i] = out[i]! * g
@@ -248,6 +420,96 @@ export function encodeWav16(samples: Float32Array, sampleRate: number): ArrayBuf
     v.setInt16(o, Math.round(s < 0 ? s * 0x8000 : s * 0x7FFF), true)
   }
   return buf
+}
+
+/** ITA2 (Baudot) letters and figures tables, indexed by the 5-bit code */
+const ITA2_LTRS = '\0E\nA SIU\rDRJNFCKTZLWHYPQOBG\0MXV\0'
+const ITA2_FIGS = '\x003\n- \x0787\r$4\',!:(5")2#6019?&\0./;\0'
+const ITA2_TO_FIGS = 27
+const ITA2_TO_LTRS = 31
+
+export interface RttySynthOptions {
+  text: string
+  sampleRate?: number
+  /** mark tone (audio), Hz; space is `shiftHz` below it */
+  markHz?: number
+  shiftHz?: number
+  baud?: number
+  amplitude?: number
+  snrDb?: number
+  noise?: Float32Array
+  leadInSec?: number
+  tailSec?: number
+  seed?: number
+}
+
+/**
+ * Amateur RTTY: continuous-phase FSK, 45.45 baud, 170 Hz shift, 5-bit ITA2
+ * with a start bit and 1.5 stop bits. Through a CW filter narrow enough to
+ * pass only one of the two tones it is a carrier keyed on and off in 22 ms
+ * steps — which is exactly what "insanely fast machine CW" sounds like, and
+ * what a contest weekend fills the CW end of the band with. Rendered so the
+ * decoder can be tested on what it must not print.
+ */
+export function renderRtty(opts: RttySynthOptions): { samples: Float32Array; sampleRate: number; duration: number } {
+  const sampleRate = opts.sampleRate ?? 8000
+  const markHz = opts.markHz ?? 880
+  const spaceHz = markHz - (opts.shiftHz ?? 170)
+  const baud = opts.baud ?? 45.45
+  const amplitude = opts.amplitude ?? 0.5
+  const rng = makeRng(opts.seed ?? 1)
+  // bit stream: idle mark, then start(0) + 5 data bits LSB first + 1.5 stop(1)
+  const bits: { v: 0 | 1; len: number }[] = [{ v: 1, len: 8 }]
+  let figs = false
+  const push = (code: number) => {
+    bits.push({ v: 0, len: 1 })
+    for (let b = 0; b < 5; b++) bits.push({ v: ((code >> b) & 1) as 0 | 1, len: 1 })
+    bits.push({ v: 1, len: 1.5 })
+  }
+  for (const ch of opts.text.toUpperCase()) {
+    const c = ch === '\n' ? '\n' : ch
+    let code = ITA2_LTRS.indexOf(c)
+    if (code > 0 && c !== ' ' && c !== '\n' && figs) { push(ITA2_TO_LTRS); figs = false }
+    if (code <= 0) {
+      code = ITA2_FIGS.indexOf(c)
+      if (code <= 0) continue
+      if (!figs && c !== ' ' && c !== '\n') { push(ITA2_TO_FIGS); figs = true }
+    }
+    push(code)
+  }
+  bits.push({ v: 1, len: 8 })
+  const lead = opts.leadInSec ?? 0.5
+  const tail = opts.tailSec ?? 0.5
+  const bitSec = 1 / baud
+  const signalSec = bits.reduce((a, b) => a + b.len, 0) * bitSec
+  const duration = lead + signalSec + tail
+  const n = Math.ceil(duration * sampleRate)
+  const out = new Float32Array(n)
+  const s0 = Math.round(lead * sampleRate)
+  let phase = 0
+  let t = 0
+  let bi = 0
+  let bitEnd = bits[0]!.len * bitSec
+  const ramp = Math.round(0.005 * sampleRate)
+  const s1 = s0 + Math.round(signalSec * sampleRate)
+  for (let i = s0; i < s1; i++) {
+    while (t >= bitEnd && bi < bits.length - 1) { bi++; bitEnd += bits[bi]!.len * bitSec }
+    const f = bits[bi]!.v ? markHz : spaceHz
+    phase += (2 * Math.PI * f) / sampleRate
+    const g = Math.min(1, (i - s0) / ramp, (s1 - i) / ramp)
+    out[i] = amplitude * g * Math.sin(phase)
+    t += 1 / sampleRate
+  }
+  const sigma = noiseRmsForSnr(opts.snrDb ?? Infinity, amplitude, sampleRate)
+  if (sigma > 0) addNoise(out, sigma, sampleRate, rng, opts.noise)
+  const headroom = amplitude + 4 * sigma
+  if (headroom > 1) for (let i = 0; i < n; i++) out[i] = out[i]! / headroom
+  return { samples: out, sampleRate, duration }
+}
+
+/** Decode ITA2 bits back to text — the counterpart used by tests of `renderRtty`. */
+export function ita2Char(code: number, figs: boolean): string {
+  return (figs ? ITA2_FIGS : ITA2_LTRS)[code] ?? ''
 }
 
 export interface SamplePreset {

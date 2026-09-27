@@ -105,6 +105,23 @@ export interface CwDecoderConfig {
   lockSpeed: boolean
   /** envelope evaluation period in ms */
   tickMs: number
+  /**
+   * Operator trims on the automatic decisions (all neutral by default, which
+   * is what the tests hold the decoder to). They move the automation rather
+   * than replace it: the levels, speed and spacing are still measured.
+   */
+  /** auto threshold moved up (+) or down (−) by this many dB */
+  thresholdOffsetDb: number
+  /** hold output until a burst looks like a transmission (off = print whatever keys the gate) */
+  squelch: boolean
+  /** recognise RTTY on the pitch and print none of it */
+  rejectRtty: boolean
+  /** letter boundary × this: above 1 waits longer before ending a letter (a fist that leaves long gaps inside letters) */
+  letterBreak: number
+  /** word boundary × this: above 1 needs a longer gap before printing a space */
+  wordBreak: number
+  /** how fast the tracked signal level follows a fade inside a transmission, ms (time constant) */
+  fadeFollowMs: number
 }
 
 export const DEFAULT_DECODER_CONFIG: Omit<CwDecoderConfig, 'sampleRate'> = {
@@ -117,7 +134,13 @@ export const DEFAULT_DECODER_CONFIG: Omit<CwDecoderConfig, 'sampleRate'> = {
   speedAveraging: 0.2,
   initialWpm: 20,
   lockSpeed: false,
-  tickMs: 2
+  tickMs: 2,
+  thresholdOffsetDb: 0,
+  squelch: true,
+  rejectRtty: true,
+  letterBreak: 1,
+  wordBreak: 1,
+  fadeFollowMs: 40
 }
 
 export interface CwDecoderEvents {
@@ -152,7 +175,8 @@ export interface CwDecoderState {
   dahMs: number
   /** estimated character speed (PARIS) from the dit length */
   wpm: number
-  /** tracked letter gap and word gap in ms */
+  /** tracked gap between the elements of a letter, and letter and word gaps, in ms */
+  elemGapMs: number
   letterGapMs: number
   wordGapMs: number
   /** in-progress pattern */
@@ -169,6 +193,10 @@ export interface CwDecoderState {
    * 0 = coin flips). Drives the readability part of the signal report.
    */
   confidence: number
+  /** RTTY (170 Hz FSK) was heard on this pitch in the last few seconds — not CW, and not printed */
+  fsk: boolean
+  /** a burst has passed the squelch and is being printed */
+  decoding: boolean
 }
 
 /** Prosigns not already in the character table — shown the way the QMX prints them. */
@@ -254,6 +282,35 @@ const SPLIT_MIN_UPPER = 0.03
  * bare K or R; four means a letter plus something, which every real over has.
  */
 const BURST_ELEMENTS = 4
+/** a burst whose marks sit this many noise σ up is a signal whatever the histogram says */
+const STRONG_BURST_SIGMA = 8
+/** amateur RTTY shift, Hz */
+const FSK_SHIFT_HZ = 170
+/**
+ * RTTY: the partner tone during our gaps is within 6 dB of our marks — it is
+ * the same transmitter, so on the band it measures within a couple of dB,
+ * where a CW station 250 Hz away leaks into the side detector 10 dB down — and
+ * 6 dB louder than it is during them (not more: RTTY bits are 22 ms, short
+ * enough that the detector smears some of the partner into our marks). An unrelated station 170 Hz away is
+ * keyed independently of ours, so it is as often on in our marks as in our gaps.
+ */
+const FSK_PARTNER_LEVEL = 0.5
+const FSK_CONTRAST = 2
+/** elements the tone / RTTY verdict is taken over */
+const VERDICT_ELEMENTS = 24
+/** ticks of detector output kept for reading element levels (2 s at the default 2 ms tick) */
+const HIST_TICKS = 1024
+/** a tone is this much (10 dB) louder on its pitch than 170 Hz away */
+const TONE_CONTRAST = 3
+/** a single mark less than this (6 dB) over the quieter side is broadband, not our tone */
+const BROADBAND_CONTRAST = 2
+/** how long the RTTY warning stays up after the last FSK burst */
+const FSK_HOLD_MS = 5000
+/** a burst held back longer than this is decoded from its most recent elements */
+const MAX_BURST_ELEMENTS = 400
+/** words of spacing evidence, and the mean length under which they are really letters */
+const WORD_HISTORY = 6
+const ONE_LETTER_WORDS = 1.35
 /** silence that ends a burst, relative to the tracked word gap (and never less) */
 const BURST_GAP_WORDS = 3
 const BURST_GAP_MIN_MS = 2000
@@ -291,6 +348,12 @@ function emaCoeff(tauMs: number, dtMs: number): number {
 
 function mean(xs: number[]): number {
   return xs.reduce((a, b) => a + b, 0) / xs.length
+}
+
+function median(xs: number[]): number {
+  const s = [...xs].sort((a, b) => a - b)
+  const m = s.length >> 1
+  return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2
 }
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -501,6 +564,18 @@ export class CwDecoder {
 
   // --- tone detector -----------------------------------------------------------
   private det!: ToneDetector
+  /**
+   * The same detector 170 Hz either side of the pitch. A keyed tone is far
+   * stronger at its own pitch than beside it; band noise coming back as a
+   * receiver unmutes, or a static crash, is as loud beside it as on it; and
+   * RTTY — which through a narrow filter sounds like very fast machine code —
+   * puts its other tone exactly in our gaps. See `burstVerdict`.
+   */
+  private sideLo: ToneDetector | null = null
+  private sideHi!: ToneDetector
+  private sideMag = 0
+  /** the quieter of the two sides: only something broadband lifts both */
+  private sideMinMag = 0
   private hop = 0
   private hopPos = 0
   private sampleCount = 0
@@ -522,6 +597,7 @@ export class CwDecoder {
   private nextSplitMs = 0
   private aPeakUp = 0
   private aPeakDown = 0
+  private aPeakDownLive = 0
   private aPeakRelease = 0
   private rawState = false
   /** time the envelope first fell below the on-level during a mark (symmetric edge timing) */
@@ -533,6 +609,23 @@ export class CwDecoder {
   private keyed = false
   /** start of the mark in progress */
   private markStartMs = 0
+  /** magnitude summed over the mark in progress, for its level */
+  /**
+   * The last couple of seconds of detector output, tick by tick — so a mark's
+   * or a gap's level is read over its settled middle, between the edges the
+   * gate reported, rather than over whatever the blanker's confirmation delay
+   * and the detector's own rise time let in from the neighbouring element.
+   * (A 22 ms RTTY bit is barely longer than the detector's settling, so an
+   * average that runs on to the confirmation smears the other tone into it.)
+   */
+  private hist = {
+    t: new Float64Array(HIST_TICKS),
+    mag: new Float32Array(HIST_TICKS),
+    side: new Float32Array(HIST_TICKS),
+    sideMin: new Float32Array(HIST_TICKS),
+    pos: 0,
+    n: 0
+  }
   /** start of the current silence — survives marks rejected as impulse noise */
   private gapStartMs = 0
   /** at least one real element has been seen, so gaps mean something */
@@ -545,6 +638,8 @@ export class CwDecoder {
   // --- timing --------------------------------------------------------------------
   private ditMs = 60
   private dahMs = 180
+  /** silence between the elements of one character — 1 dit from a keyer, 1.2–1.8 from a straight key */
+  private elemGapMs = 60
   private letterGapMs = 180
   private wordGapMs = 420
   private marks: number[] = []
@@ -560,9 +655,35 @@ export class CwDecoder {
   private charFlushed = true
   private wordFlushed = true
   private hasOutput = false
-  /** elements in the current burst, and the characters it has produced so far */
-  private burstElements = 0
-  private held: ({ ch: string; pattern: string } | null)[] = []
+  /**
+   * The burst in progress, as raw durations, until it passes the squelch: each
+   * mark and the silence before it (the first one's is the gap since the last
+   * burst). Nothing is decoded from it or learned from it before then — a
+   * burst that turns out to be band hash or RTTY must not drag the speed
+   * estimate onto itself, and one that turns out to be code is decoded as a
+   * whole with the timing fitted to it, so its first letters are read at the
+   * sender's speed rather than whatever the last station ran.
+   */
+  private burstMarks: number[] = []
+  private burstGaps: number[] = []
+  /**
+   * Mean magnitude of the burst's recent marks on the pitch and 170 Hz beside
+   * it, and beside it in the gap before each — kept through the live phase too,
+   * so RTTY that slipped through is caught within a few elements.
+   */
+  private burstLevels: number[] = []
+  private burstSides: number[] = []
+  private burstGapSides: number[] = []
+  /** when RTTY (two-tone FSK) was last recognised on the frequency */
+  private fskSeenMs = -Infinity
+  /** the burst passed the squelch: its elements are decoded as they arrive */
+  private live = false
+  /** where the burst in progress began, and where the last printed one ended */
+  private burstStartMs = 0
+  private lastLiveEdgeMs = -Infinity
+  /** characters in each of the last few printed words (letter/word spacing evidence) */
+  private wordLens: number[] = []
+  private charsInWord = 0
 
   constructor(config: Partial<CwDecoderConfig> & { sampleRate: number }, events: CwDecoderEvents = {}) {
     this.cfg = { ...DEFAULT_DECODER_CONFIG, ...config }
@@ -579,7 +700,8 @@ export class CwDecoder {
       patch.centerHz !== undefined && patch.centerHz !== prev.centerHz ||
       patch.bandwidthHz !== undefined && patch.bandwidthHz !== prev.bandwidthHz ||
       patch.sampleRate !== undefined && patch.sampleRate !== prev.sampleRate ||
-      patch.tickMs !== undefined && patch.tickMs !== prev.tickMs
+      patch.tickMs !== undefined && patch.tickMs !== prev.tickMs ||
+      patch.fadeFollowMs !== undefined && patch.fadeFollowMs !== prev.fadeFollowMs
     ) {
       this.configureDetector()
     }
@@ -595,6 +717,8 @@ export class CwDecoder {
     // two cascaded boxcars of length T each have a −3 dB width of ≈ 0.64 / T
     const win = Math.max(8, Math.round((0.64 * sampleRate) / Math.max(10, bandwidthHz)))
     this.det = new ToneDetector(sampleRate, centerHz, win)
+    this.sideHi = new ToneDetector(sampleRate, centerHz + FSK_SHIFT_HZ, win)
+    this.sideLo = centerHz - FSK_SHIFT_HZ >= 150 ? new ToneDetector(sampleRate, centerHz - FSK_SHIFT_HZ, win) : null
     this.hop = Math.max(1, Math.round((sampleRate * tickMs) / 1000))
     this.hopPos = 0
     const dt = (this.hop / sampleRate) * 1000
@@ -615,6 +739,7 @@ export class CwDecoder {
     this.detectorBandwidthHz = bandwidthHz
     this.aPeakUp = emaCoeff(40, dt)
     this.aPeakDown = emaCoeff(120, dt)
+    this.aPeakDownLive = emaCoeff(clamp(this.cfg.fadeFollowMs, 5, 2000), dt)
     // Between two transmissions the band is quiet for tens of seconds. A peak
     // that decayed in a second or two would drop the threshold into the hash
     // every time the other station stopped talking, and the decoder would
@@ -627,10 +752,12 @@ export class CwDecoder {
   resetTiming() {
     this.ditMs = clamp(1200 / this.cfg.initialWpm, MIN_DIT_MS, MAX_DIT_MS)
     this.dahMs = this.ditMs * 3
+    this.elemGapMs = this.ditMs
     this.letterGapMs = this.ditMs * 3
     this.wordGapMs = this.ditMs * 7
     this.marks = []
     this.gaps = []
+    this.wordLens = []
     this.calibrated = false
     this.spacingCalibrated = false
     this.outliers = 0
@@ -674,7 +801,7 @@ export class CwDecoder {
    * rather than mixed with the new levels.
    */
   resetLevels() {
-    if (this.pattern) this.flushChar()
+    if (this.live && this.pattern) this.flushChar()
     this.levels.reset()
     this.floor = 0
     this.sigma = 0
@@ -697,15 +824,25 @@ export class CwDecoder {
     // holding it would print last session's squelched characters in front of
     // this one's first word, and its element count would let the next burst
     // through the squelch without earning it.
-    this.burstElements = 0
-    this.held = []
+    this.dropBurst()
   }
 
-  /** Feed PCM (mono, -1..1). Any block length is fine. */
-  process(samples: Float32Array | number[]) {
+  /**
+   * Feed PCM (mono, -1..1). Any block length is fine. `side`, when given, is
+   * the same audio before any band-pass the host put in front of `samples`:
+   * the 170 Hz side detectors must hear the band beside the pitch, which a
+   * pre-filter narrow enough to help the main detector takes 8–10 dB off —
+   * enough to hide the other tone of an RTTY pair.
+   */
+  process(samples: Float32Array | number[], side?: Float32Array | number[]) {
     const n = samples.length
+    const aside = side && side.length === n ? side : samples
     for (let i = 0; i < n; i++) {
-      this.det.push(samples[i]!)
+      const x = samples[i]!
+      const y = aside[i]!
+      this.det.push(x)
+      this.sideHi.push(y)
+      this.sideLo?.push(y)
       this.sampleCount++
       if (++this.hopPos >= this.hop) {
         this.hopPos = 0
@@ -723,6 +860,10 @@ export class CwDecoder {
     const nowMs = this.timeMs
     const mag = this.det.magnitude()
     this.magnitude = mag
+    const hi = this.sideHi.magnitude()
+    const lo = this.sideLo ? this.sideLo.magnitude() : hi
+    this.sideMag = Math.max(hi, lo)
+    this.sideMinMag = Math.min(hi, lo)
     if (!this.det.ready) return
 
     // --- level model: percentiles of the last LEVEL_WINDOW_MS, nothing else ---
@@ -761,7 +902,15 @@ export class CwDecoder {
       // follows the peak onto the hash, the hash then keys it, and the dit
       // estimate collapses behind it. A fading signal's marks are tens of ms
       // and still bring the peak down inside a character.
-      this.peak += (mag - this.peak) * this.aPeakDown
+      //
+      // Inside a burst that has passed the squelch the peak follows three times
+      // faster: that is a station, not the hash, and HF fading takes 10 dB off
+      // it in a few hundred ms. At the slower rate the gate — halfway up the old
+      // peak — ends up above the faded marks, which then break up or vanish,
+      // and a peak that only moves while the gate is open never learns they
+      // faded. (Measured on ITU-R F.1487 moderate/poor channels: 86 → 93 % and
+      // 83 → 96 % copy at 15 dB, with the real takes unchanged.)
+      this.peak += (mag - this.peak) * (this.live ? this.aPeakDownLive : this.aPeakDown)
     } else if (!this.rawState) {
       this.peak += (this.floor - this.peak) * this.aPeakRelease
     }
@@ -784,12 +933,20 @@ export class CwDecoder {
       const span = this.peak - this.floor
       onLevel = Math.max(
         this.floor + span * 0.5, // halfway up a signal we are already tracking
-        this.sigma * (this.signalPresent ? CFAR_OPEN : CFAR_QUIET), // CFAR gate against band noise
+        // CFAR gate against band noise — relaxed once something on frequency
+        // is known to be a signal: the histogram says so, or a burst of it
+        // passed the squelch and is being decoded
+        this.sigma * (this.signalPresent || this.live ? CFAR_OPEN : CFAR_QUIET),
         this.floor * Math.pow(10, this.cfg.minSnrDb / 20), // operator squelch
         ABSOLUTE_FLOOR // digital silence (or a far-off tone's sidelobe) must never key
       )
       offLevel = this.floor + span * 0.4
       if (offLevel > onLevel * 0.9) offLevel = onLevel * 0.9
+      if (this.cfg.thresholdOffsetDb) {
+        const g = Math.pow(10, this.cfg.thresholdOffsetDb / 20)
+        onLevel = Math.max(ABSOLUTE_FLOOR, onLevel * g)
+        offLevel = Math.min(onLevel * 0.9, Math.max(ABSOLUTE_FLOOR * 0.7, offLevel * g))
+      }
     }
     this.threshold = onLevel
     let raw = this.rawState
@@ -823,22 +980,34 @@ export class CwDecoder {
     if (this.candidateState !== this.keyed && nowMs - this.candidateSinceMs >= this.cfg.noiseBlankerMs) {
       this.setKeyed(this.candidateState, this.candidateSinceMs)
     }
+    const h = this.hist
+    h.t[h.pos] = nowMs
+    h.mag[h.pos] = mag
+    h.side[h.pos] = this.sideMag
+    h.sideMin[h.pos] = this.sideMinMag
+    h.pos = (h.pos + 1) % HIST_TICKS
+    if (h.n < HIST_TICKS) h.n++
 
     // --- real-time flushing during silence ---
     if (!this.keyed && this.hasEdge) {
-      const silence = nowMs - this.gapStartMs
-      if (!this.charFlushed && silence >= this.letterBoundary()) this.flushChar()
-      if (!this.wordFlushed && (this.hasOutput || this.held.length) && silence >= this.wordBoundary()) {
-        this.wordFlushed = true
-        this.emit(null)
-      }
-      if (this.held.length) {
-        if (this.printable) this.releaseBurst()
-        else if (silence >= this.burstGapMs()) {
-          // the burst ended without ever looking like code — drop it unprinted
-          this.held = []
-          this.burstElements = 0
+      // A key-down the blanker has not confirmed yet ended this silence where it
+      // began. Measuring on to `nowMs` instead lets the letter boundary pass
+      // during the blanker's hold, and every element gap that falls within a
+      // blanker length of the boundary splits its letter in two.
+      const until = this.candidateState ? this.candidateSinceMs : nowMs
+      const silence = until - this.gapStartMs
+      if (!this.live && this.printable) this.goLive()
+      if (this.live) {
+        if (!this.charFlushed && silence >= this.letterBoundary()) this.flushChar()
+        if (!this.wordFlushed && this.hasOutput && silence >= this.wordBoundary()) {
+          this.wordFlushed = true
+          this.emitWordGap()
         }
+      }
+      if (silence >= this.burstGapMs() && (this.live || this.burstMarks.length)) {
+        // the over ended; one that never looked like code is dropped unprinted
+        if (this.live && !this.charFlushed) this.flushChar()
+        this.dropBurst()
       }
     }
   }
@@ -849,7 +1018,12 @@ export class CwDecoder {
    * limit, which is what keeps a static crash from ever becoming an `E`.
    */
   private minMarkMs(): number {
-    return Math.max(MIN_MARK_MS, this.ditMs * 0.35)
+    // Until a burst passes the squelch the dit estimate is somebody else's —
+    // the last station's, or the prior — and scaling the rejection from it
+    // deadlocks on a faster sender: at a 10 WPM prior a 40 WPM dit (30 ms) is
+    // "noise", so the dit estimate never sees one and never shrinks.
+    // Before then the rejection assumes no slower than 20 WPM (21 ms at most).
+    return Math.max(MIN_MARK_MS, 0.35 * (this.live ? this.ditMs : Math.min(this.ditMs, 60)))
   }
 
   private setKeyed(down: boolean, atMs: number) {
@@ -860,22 +1034,240 @@ export class CwDecoder {
       return
     }
     const dur = atMs - this.markStartMs
-    if (dur < this.minMarkMs()) {
-      // Impulse noise. Drop it *without* moving `gapStartMs`: a crash in the
-      // middle of a letter gap must not split that gap into two short ones and
-      // glue the letters on either side of it together.
+    const { mag: level, side, sideMin } = this.settledMeans(this.markStartMs, atMs)
+    if (dur < this.minMarkMs() || (this.sideLo && level < sideMin * BROADBAND_CONTRAST)) {
+      // Impulse noise — too short to be an element, or as loud on both sides
+      // of the pitch as on it (a static crash is broadband; a station beside
+      // us lifts only one side). Drop it *without* moving `gapStartMs`: a
+      // crash in the middle of a letter gap must not split that gap into two
+      // short ones and glue the letters on either side of it together.
       return
     }
-    if (this.hasEdge) {
-      const gap = this.markStartMs - this.gapStartMs
-      if (gap >= this.burstGapMs()) this.burstElements = 0
-      this.onGapEnded(gap)
+    const gap = this.hasEdge ? this.markStartMs - this.gapStartMs : Infinity
+    const gapSide = this.hasEdge ? this.settledMeans(this.gapStartMs, this.markStartMs).side : 0
+    if (gap >= this.burstGapMs()) {
+      // a new over (the silence check in `tick` normally got here first)
+      if (this.live && !this.charFlushed) this.flushChar()
+      this.dropBurst()
     }
     this.hasEdge = true
-    this.burstElements++
-    this.onMarkEnded(dur)
-    if (this.held.length && this.printable) this.releaseBurst()
     this.gapStartMs = atMs
+    this.burstLevels.push(level)
+    this.burstSides.push(side)
+    this.burstGapSides.push(gapSide)
+    if (this.burstLevels.length > VERDICT_ELEMENTS) {
+      this.burstLevels.shift()
+      this.burstSides.shift()
+      this.burstGapSides.shift()
+    }
+    if (this.live) {
+      if (this.cfg.rejectRtty && this.burstLevels.length >= BURST_ELEMENTS && this.burstVerdict() === 'fsk') {
+        // it was RTTY after all: stop printing it
+        this.fskSeenMs = this.timeMs
+        this.flushChar()
+        this.dropBurst()
+        return
+      }
+      this.onGapEnded(gap)
+      this.onMarkEnded(dur)
+      this.lastLiveEdgeMs = atMs
+      return
+    }
+    if (!this.burstMarks.length) this.burstStartMs = this.markStartMs
+    this.burstMarks.push(dur)
+    this.burstGaps.push(gap)
+    if (this.burstMarks.length > MAX_BURST_ELEMENTS) {
+      this.burstMarks.shift()
+      this.burstGaps.shift()
+    }
+    // show it on the element ribbon at the timing we have; it is decoded for
+    // real (and learned from) only once the burst passes the squelch — and not
+    // shown at all while the frequency is known to carry RTTY, whose bits
+    // would otherwise scroll past as an endless "character in progress"
+    if (this.cfg.rejectRtty && this.timeMs - this.fskSeenMs < FSK_HOLD_MS) {
+      if (this.pattern) {
+        this.pattern = ''
+        this.ev.onPattern?.('')
+      }
+    } else {
+      const el: '.' | '-' = dur < this.markBoundary() ? '.' : '-'
+      this.ev.onElement?.(el, dur)
+      this.pattern = gap >= this.letterBoundary() ? el : this.pattern + el
+      this.ev.onPattern?.(this.pattern)
+    }
+    if (this.printable) this.goLive()
+  }
+
+  /**
+   * Mean detector output over the settled middle of [fromMs, toMs]: a
+   * detector window in from each edge, where the step response has finished
+   * rising. A segment too short to have one is read at its centre.
+   */
+  private settledMeans(fromMs: number, toMs: number): { mag: number; side: number; sideMin: number } {
+    const h = this.hist
+    const settle = (this.det.win / this.cfg.sampleRate) * 1000
+    let a = fromMs + settle
+    let b = toMs - settle
+    if (b < a) a = b = (fromMs + toMs) / 2
+    let mag = 0
+    let side = 0
+    let sideMin = 0
+    let n = 0
+    let nearest = -1
+    let nearestD = Infinity
+    for (let k = 1; k <= h.n; k++) {
+      const i = (h.pos - k + HIST_TICKS) % HIST_TICKS
+      const t = h.t[i]!
+      if (t < a - 4) break
+      const d = Math.abs(t - (a + b) / 2)
+      if (d < nearestD) { nearestD = d; nearest = i }
+      if (t >= a && t <= b) {
+        mag += h.mag[i]!
+        side += h.side[i]!
+        sideMin += h.sideMin[i]!
+        n++
+      }
+    }
+    if (n) return { mag: mag / n, side: side / n, sideMin: sideMin / n }
+    if (nearest >= 0) return { mag: h.mag[nearest]!, side: h.side[nearest]!, sideMin: h.sideMin[nearest]! }
+    return { mag: 0, side: 0, sideMin: 0 }
+  }
+
+  /** forget the burst in progress: it ended, or it never passed the squelch */
+  private dropBurst() {
+    this.live = false
+    this.burstMarks = []
+    this.burstGaps = []
+    this.burstLevels = []
+    this.burstSides = []
+    this.burstGapSides = []
+    if (this.pattern && this.charFlushed) {
+      this.pattern = ''
+      this.ev.onPattern?.('')
+    }
+    this.currentMarks = []
+  }
+
+  /**
+   * The burst passed the squelch. Fit the timing to everything it holds —
+   * element speed from its marks, spacing from its gaps — then decode it
+   * from the start with that timing, and go on decoding it element by
+   * element from here.
+   */
+  private goLive() {
+    const marks = this.burstMarks
+    const gaps = this.burstGaps
+    this.live = true
+    this.burstMarks = []
+    this.burstGaps = []
+    // The silence since the last printed burst is spacing evidence too, when it
+    // is short enough to be spacing rather than a pause: the stretched word gap
+    // of a Farnsworth sender outlasts the burst timeout, and it is the only
+    // thing that shows the gaps inside the burst to be letter gaps.
+    const since = this.burstStartMs - this.lastLiveEdgeMs
+    this.fitBurst(marks, gaps, Number.isFinite(since) ? since : undefined)
+    this.lastLiveEdgeMs = this.gapStartMs
+    this.pattern = ''
+    this.currentMarks = []
+    this.charFlushed = true
+    const boundary = this.markBoundary()
+    for (let i = 0; i < marks.length; i++) {
+      const g = gaps[i]!
+      if (i > 0 && this.pattern && g >= this.letterBoundary()) {
+        this.flushChar()
+        if (g >= this.wordBoundary() && this.hasOutput) {
+          this.wordFlushed = true
+          this.emitWordGap()
+        }
+      }
+      this.currentMarks.push(marks[i]!)
+      this.pattern += marks[i]! < boundary ? '.' : '-'
+      this.charFlushed = false
+      this.wordFlushed = false
+    }
+    this.ev.onPattern?.(this.pattern)
+  }
+
+  /**
+   * Timing from one burst's own durations, snapped rather than smoothed: the
+   * trackers' history belongs to whoever was on before, and the point of
+   * holding the burst back was to read it at its own speed.
+   */
+  private fitBurst(marks: number[], gaps: number[], sinceLastMs?: number) {
+    if (this.cfg.lockSpeed || !marks.length) return
+    const prevDit = this.ditMs
+    const split = splitClusters(marks, 1.8)
+    if (split) {
+      this.ditMs = split.low
+      this.dahMs = split.high
+      this.calibrated = true
+    } else {
+      // one class only (a run of Es or Ts): which one it is follows from the
+      // speed we had; the other cluster rides along at 3:1
+      const m = median(marks)
+      if (m < this.markBoundary()) { this.ditMs = m; this.dahMs = m * 3 } else { this.dahMs = m; this.ditMs = m / 3 }
+    }
+    this.boundElementSpeed()
+    this.marks = marks.slice(-MARK_HISTORY)
+    this.outliers = 0
+    const ratio = this.ditMs / prevDit
+    this.elemGapMs *= ratio
+    this.letterGapMs *= ratio
+    this.wordGapMs *= ratio
+
+    // spacing: the burst's gaps below the pause limit, first one excluded
+    const inner = gaps.slice(1).filter(g => g < this.ditMs * MAX_GAP_DITS)
+    const pause = this.ditMs * MAX_GAP_DITS
+    const lead = sinceLastMs !== undefined && sinceLastMs < pause ? [sinceLastMs] : []
+    if (!inner.length && !lead.length) { this.clampSpacing(); return }
+    const s = splitClusters(inner, 1.6)
+    let intra: number[]
+    let rest: number[]
+    if (s) {
+      const b = Math.sqrt(s.low * s.high)
+      intra = inner.filter(g => g < b)
+      rest = inner.filter(g => g >= b)
+    } else if (inner.length && median(inner) < this.ditMs * 2.2) {
+      intra = inner
+      rest = []
+    } else {
+      intra = []
+      rest = inner
+    }
+    if (intra.length) this.elemGapMs = median(intra)
+    if (rest.length) {
+      const s2 = splitClusters(rest, 1.5)
+      if (s2) {
+        this.letterGapMs = s2.low
+        this.wordGapMs = s2.high
+        this.spacingCalibrated = true
+      } else {
+        const m = median(rest)
+        // One class of long gaps: letter gaps or word gaps? Nearer 3 dits than
+        // 7 (in ratio) they are letter gaps. Nearer 7, a keyer's are word gaps —
+        // unless the silence before this burst was far longer still (the word
+        // gap of a Farnsworth sender, which outlasts the burst timeout), or the
+        // fist is a hand's, which stretches everything: six or more one-letter
+        // "words" in a row is its letter spacing, not six words.
+        const longer = lead.length && lead[0]! > m * 1.8 ? lead[0]! : 0
+        const letters = m < this.ditMs * Math.sqrt(3 * 7) || longer > 0 ||
+          (this.handSent() && rest.length + 1 >= WORD_HISTORY) ||
+          (this.spacingCalibrated && m < this.wordBoundary())
+        if (letters) {
+          this.letterGapMs = m
+          if (longer) {
+            this.wordGapMs = longer
+            this.spacingCalibrated = true
+          } else if (this.wordGapMs < m * 1.6) {
+            this.wordGapMs = m * (7 / 3)
+          }
+        } else {
+          this.wordGapMs = m
+        }
+      }
+      this.gaps = rest.slice(-GAP_HISTORY)
+    }
+    this.clampSpacing()
   }
 
   // --- timing boundaries ---------------------------------------------------------
@@ -887,13 +1279,13 @@ export class CwDecoder {
 
   /** silence longer than this ends a character */
   private letterBoundary(): number {
-    // between the intra-character gap (≈1 dit) and the tracked letter gap
-    return Math.sqrt(this.ditMs * this.letterGapMs)
+    // between the measured intra-character gap and the tracked letter gap
+    return Math.sqrt(this.elemGapMs * this.letterGapMs) * this.cfg.letterBreak
   }
 
   /** silence longer than this is a word break */
   private wordBoundary(): number {
-    return Math.sqrt(this.letterGapMs * this.wordGapMs)
+    return Math.max(this.letterBoundary() * 1.2, Math.sqrt(this.letterGapMs * this.wordGapMs) * this.cfg.wordBreak)
   }
 
   // --- element handling ------------------------------------------------------------
@@ -938,6 +1330,7 @@ export class CwDecoder {
           // The sender's spacing scales with their element speed: rescale the
           // spacing clusters, and forget gaps classified under the old speed
           const ratio = this.ditMs / prevDit
+          this.elemGapMs *= ratio
           this.letterGapMs *= ratio
           this.wordGapMs *= ratio
           this.gaps = []
@@ -952,14 +1345,7 @@ export class CwDecoder {
         this.dahMs += (dur - this.dahMs) * a
         if (!this.calibrated) this.ditMs = this.dahMs / 3
       }
-      // Hold the estimate inside the speeds CW is sent at. Without this the
-      // tracker has no fixed point: a burst of noise marks drags the dit down,
-      // a shorter dit widens the window of things that count as elements, and
-      // it walks itself to a 2 ms "dit" and 600 WPM of E and T.
-      this.ditMs = clamp(this.ditMs, MIN_DIT_MS, MAX_DIT_MS)
-      // keep the clusters physically plausible (dah:dit between 2 and 5)
-      if (this.dahMs < this.ditMs * 2) this.dahMs = this.ditMs * 2
-      if (this.dahMs > this.ditMs * 5) this.dahMs = this.ditMs * 5
+      this.boundElementSpeed()
       // spacing clusters ride along with the element speed until measured
       this.clampSpacing()
 
@@ -970,13 +1356,32 @@ export class CwDecoder {
     this.ev.onPattern?.(this.pattern)
   }
 
+  /**
+   * Hold the element estimate inside the speeds CW is sent at. Without this
+   * the tracker has no fixed point: a burst of noise marks drags the dit down,
+   * a shorter dit widens the window of things that count as elements, and it
+   * walks itself to a 2 ms "dit" and 600 WPM of E and T.
+   */
+  private boundElementSpeed() {
+    this.ditMs = clamp(this.ditMs, MIN_DIT_MS, MAX_DIT_MS)
+    // keep the clusters physically plausible (dah:dit between 2 and 5)
+    if (this.dahMs < this.ditMs * 2) this.dahMs = this.ditMs * 2
+    if (this.dahMs > this.ditMs * 5) this.dahMs = this.ditMs * 5
+  }
+
   private onGapEnded(dur: number) {
     // how cleanly did this gap fall into intra / letter / word?
-    if (dur < this.wordBoundary()) this.noteMargin(this.margin(dur, this.ditMs, this.letterGapMs))
+    if (dur < this.wordBoundary()) this.noteMargin(this.margin(dur, this.elemGapMs, this.letterGapMs))
     else if (dur < this.wordGapMs * 2) this.noteMargin(this.margin(dur, this.letterGapMs, this.wordGapMs))
-    if (this.cfg.lockSpeed) return
-    // intra-character gaps carry no spacing information we use
-    if (dur < this.letterBoundary()) return
+    if (this.cfg.lockSpeed || !Number.isFinite(dur)) return
+    if (dur < this.letterBoundary()) {
+      // The gap between the elements of a letter: a keyer makes it one dit, a
+      // straight key rarely does (1.2–1.8 is usual). The letter boundary sits
+      // between this and the letter gap, so it has to be measured, not assumed.
+      this.elemGapMs += (dur - this.elemGapMs) * this.cfg.speedAveraging
+      this.clampSpacing()
+      return
+    }
     // Long pauses — the sender gathering their thoughts, or the end of an over
     // — must not stretch the word gap. The limit is in dits, not in multiples
     // of the tracked word gap, which would let each long pause raise the bar
@@ -1024,7 +1429,9 @@ export class CwDecoder {
    * letter of it apart.
    */
   private clampSpacing() {
-    this.letterGapMs = clamp(this.letterGapMs, this.ditMs * 2, this.ditMs * 30)
+    // nobody leaves less than half a dit or more than 2.5 inside a letter
+    this.elemGapMs = clamp(this.elemGapMs, this.ditMs * 0.5, this.ditMs * 2.5)
+    this.letterGapMs = clamp(this.letterGapMs, Math.max(this.ditMs * 2, this.elemGapMs * 1.6), this.ditMs * 30)
     this.wordGapMs = clamp(this.wordGapMs, this.letterGapMs * 1.6, this.letterGapMs * 4)
   }
 
@@ -1036,29 +1443,47 @@ export class CwDecoder {
     this.pattern = ''
     this.currentMarks = []
     this.ev.onPattern?.('')
-    this.emit({ ch, pattern })
+    this.hasOutput = true
+    this.charsInWord++
+    this.ev.onCharacter?.(ch, pattern)
+  }
+
+  /**
+   * Print a word space, and keep the evidence of what the spacing classes
+   * are. Words of one letter are rare in real traffic — "R R", "E E", a lone
+   * "K" — so when a hand-sent fist's words keep coming out a single letter
+   * long, the gaps being called word gaps are its letter gaps (a straight key
+   * leaving 8–15 dits between letters), and the spacing clusters move up.
+   */
+  private emitWordGap() {
+    this.ev.onWordGap?.()
+    if (this.charsInWord) {
+      this.wordLens.push(this.charsInWord)
+      if (this.wordLens.length > WORD_HISTORY) this.wordLens.shift()
+    }
+    this.charsInWord = 0
+    if (this.cfg.lockSpeed || this.wordLens.length < WORD_HISTORY || !this.handSent()) return
+    if (mean(this.wordLens) <= ONE_LETTER_WORDS) {
+      this.letterGapMs = this.wordGapMs
+      this.wordGapMs = this.letterGapMs * (7 / 3)
+      this.gaps = []
+      this.wordLens = []
+      this.clampSpacing()
+    }
+  }
+
+  /**
+   * The fist is a hand's, not a keyer's: the gap inside a letter measures a
+   * quarter dit or more over the dit. A keyer times it to exactly one, so a
+   * keyed run of one-letter words (a character drill, "E E") keeps its spaces.
+   */
+  private handSent(): boolean {
+    return this.elemGapMs >= this.ditMs * 1.25
   }
 
   /** silence after which the next element starts a new burst */
   private burstGapMs(): number {
     return Math.max(BURST_GAP_MIN_MS, this.wordGapMs * BURST_GAP_WORDS)
-  }
-
-  /**
-   * Queue a character (or, for `null`, a word space) behind the burst squelch,
-   * or pass it straight through once the burst has proved itself.
-   */
-  private emit(item: { ch: string; pattern: string } | null) {
-    // `!held.length` keeps the queue in order: the squelch can open part-way
-    // through a tick, and a character flushed after it opened must not overtake
-    // the ones still waiting from before.
-    if (this.printable && !this.held.length) {
-      this.hasOutput = true
-      if (item) this.ev.onCharacter?.(item.ch, item.pattern)
-      else this.ev.onWordGap?.()
-      return
-    }
-    this.held.push(item)
   }
 
   /**
@@ -1069,18 +1494,37 @@ export class CwDecoder {
    * histogram with a transmission's duty cycle behind it.
    */
   private get printable(): boolean {
-    return this.burstElements >= BURST_ELEMENTS && this.signalPresent
+    const n = this.burstMarks.length
+    if (n < (this.cfg.squelch ? BURST_ELEMENTS : 1)) return false
+    const v = n >= BURST_ELEMENTS ? this.burstVerdict() : 'tone'
+    if (v === 'fsk') {
+      this.fskSeenMs = this.timeMs
+      if (this.cfg.rejectRtty) return false
+    }
+    if (!this.cfg.squelch || this.signalPresent) return true
+    // The histogram's two-mode test is blind when the window holds three
+    // levels — band noise, a station between overs, and the operator's own
+    // sidetone well above both — so a burst also passes on its own strength:
+    // marks this far over the noise scale are not something Rayleigh noise
+    // produces (P = e^(−k²/2) per sample, 10⁻¹⁴ at 8 σ), provided they are a
+    // tone and not the whole band getting louder.
+    return v === 'tone' && this.sigma > 0 && median(this.burstLevels) >= this.sigma * STRONG_BURST_SIGMA
   }
 
-  /** the burst qualified: let everything it produced out */
-  private releaseBurst() {
-    const held = this.held
-    this.held = []
-    for (const item of held) {
-      this.hasOutput = true
-      if (item) this.ev.onCharacter?.(item.ch, item.pattern)
-      else this.ev.onWordGap?.()
-    }
+  /**
+   * What the burst's marks are, judged by the side detectors 170 Hz away:
+   *  - 'fsk'   the other tone of an RTTY pair fills our gaps and vanishes in
+   *            our marks — radioteletype, which no CW decoder can read
+   *  - 'tone'  narrowband: far louder on the pitch than beside it
+   *  - 'broad' as loud beside the pitch as on it: static, splatter, or band
+   *            noise returning between the operator's own muted elements
+   */
+  private burstVerdict(): 'fsk' | 'tone' | 'broad' {
+    const level = median(this.burstLevels)
+    const side = median(this.burstSides)
+    const gapSide = median(this.burstGapSides.slice(1))
+    if (gapSide >= level * FSK_PARTNER_LEVEL && gapSide >= side * FSK_CONTRAST) return 'fsk'
+    return level >= side * TONE_CONTRAST ? 'tone' : 'broad'
   }
 
   /** Force out whatever is pending (end of a recording). */
@@ -1105,13 +1549,16 @@ export class CwDecoder {
       ditMs: this.ditMs,
       dahMs: this.dahMs,
       wpm: 1200 / this.ditMs,
+      elemGapMs: this.elemGapMs,
       letterGapMs: this.letterGapMs,
       wordGapMs: this.wordGapMs,
       pattern: this.pattern,
       timeMs: this.timeMs,
       calibrated: this.calibrated,
       signalPresent: this.signalPresent,
-      confidence: this.confidence
+      confidence: this.confidence,
+      fsk: this.timeMs - this.fskSeenMs < FSK_HOLD_MS,
+      decoding: this.live
     }
   }
 }
