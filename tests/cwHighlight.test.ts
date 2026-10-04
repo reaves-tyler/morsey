@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { highlightCw, type TokenKind } from '../app/utils/cwHighlight'
+import { highlightCw, qrzUrl, type TokenKind } from '../app/utils/cwHighlight'
 
 const kinds = (text: string) => highlightCw(text).filter(t => t.kind !== 'space').map(t => `${t.text}:${t.kind}`)
 const kindOf = (word: string): TokenKind => highlightCw(word)[0]!.kind
@@ -83,5 +83,15 @@ describe('highlightCw', () => {
       'NR7Y:callsign', 'DE:abbr', 'W1AW:callsign', 'UR:abbr', 'RST:abbr', '5NN:rst', '5NN:rst',
       'QTH:qsignal', 'CT:text', 'CT:text', 'NAME:abbr', 'BOB:text', 'HW:abbr', '?:text', '<KN>:prosign'
     ])
+  })
+
+  it('links a callsign to the QRZ page of its home call', () => {
+    expect(qrzUrl('W1AW')).toBe('https://www.qrz.com/db/W1AW')
+    expect(qrzUrl('DL/W1AW')).toBe('https://www.qrz.com/db/W1AW')
+    expect(qrzUrl('G4ABC/P')).toBe('https://www.qrz.com/db/G4ABC')
+    expect(qrzUrl('W1AW/7')).toBe('https://www.qrz.com/db/W1AW')
+    expect(qrzUrl('4X4ABC')).toBe('https://www.qrz.com/db/4X4ABC')
+    expect(qrzUrl('CQ')).toBeNull()
+    expect(qrzUrl('5NN')).toBeNull()
   })
 })

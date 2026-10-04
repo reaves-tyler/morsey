@@ -9,11 +9,14 @@
  * copy into icons or labels. The only substitution is the decoder's `*`
  * (pattern matched no character), drawn as a dim dot like the keyer pages.
  *
+ * A callsign is a link to its QRZ page (opened in a new tab) so a station
+ * heard on the air can be looked up straight from the copy.
+ *
  * The tooltip is one fixed-position element for the whole block, placed from
  * the hovered span's rectangle, so it appears with no delay and is never
  * clipped by the scrolling terminal.
  */
-import { highlightCw, type TokenKind } from '~/utils/cwHighlight'
+import { highlightCw, qrzUrl, type TokenKind } from '~/utils/cwHighlight'
 
 const props = defineProps<{ text: string }>()
 
@@ -28,7 +31,7 @@ const KIND_CLASS: Record<TokenKind, string> = {
   qsignal: 'text-cyan-300 cw-tip',
   rst: 'text-sky-300 cw-tip',
   abbr: 'text-emerald-400 underline decoration-dotted decoration-emerald-500/40 underline-offset-4 cw-tip',
-  callsign: 'text-amber-300 font-semibold cw-tip'
+  callsign: 'text-amber-300 font-semibold cw-tip underline decoration-amber-500/40 underline-offset-4 hover:text-amber-200 hover:decoration-amber-300'
 }
 
 const tip = ref<{ text: string; x: number; y: number; below: boolean } | null>(null)
@@ -52,6 +55,14 @@ function onOut(e: MouseEvent) {
     <template v-for="(tok, i) in tokens" :key="i">
       <template v-if="tok.kind === 'text' || tok.kind === 'space' || tok.kind === 'newline'">{{ tok.text }}</template>
       <span v-else-if="tok.kind === 'unknown'" :class="KIND_CLASS.unknown" :data-tip="tok.tip">·</span>
+      <a
+        v-else-if="tok.kind === 'callsign'"
+        :href="qrzUrl(tok.text) ?? undefined"
+        target="_blank"
+        rel="noopener noreferrer"
+        :class="KIND_CLASS.callsign"
+        :data-tip="`${tok.tip} · click to look up on QRZ`"
+      >{{ tok.text }}</a>
       <span v-else :class="KIND_CLASS[tok.kind]" :data-tip="tok.tip">{{ tok.text }}</span>
     </template>
     <Teleport to="body">

@@ -113,6 +113,17 @@ const RST_RE = /^[1-5][1-9N][1-9N]$/
  */
 const CALLSIGN_RE = /^(?:[A-Z0-9]{1,3}\/)?([A-Z]{1,2}|[0-9][A-Z]{1,2})([0-9])([A-Z]{1,4})(?:\/[A-Z0-9]{1,3})?$/
 
+/**
+ * QRZ lookup for a callsign token: the home call without a `DL/` prefix or
+ * `/P`-style suffix (QRZ keeps pages under the home call), or null when the
+ * word is not a callsign.
+ */
+export function qrzUrl(word: string): string | null {
+  const m = CALLSIGN_RE.exec(word)
+  if (!m) return null
+  return `https://www.qrz.com/db/${m[1]}${m[2]}${m[3]}`
+}
+
 function classify(word: string): HighlightToken {
   if (word in CHAR_PROSIGNS) return { text: word, kind: 'prosign', tip: CHAR_PROSIGNS[word] }
   const dict = DICTIONARY[word]

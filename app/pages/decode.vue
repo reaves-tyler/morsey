@@ -24,7 +24,6 @@ import { DEFAULT_DEVICE, isLive, type DecoderSource } from '~/composables/useCwS
 
 const dec = useCwStreamDecoder()
 const s = dec.settings
-const { progress } = useProgress()
 
 // ---- Source & lifecycle --------------------------------------------------------
 
@@ -154,8 +153,14 @@ onMounted(() => { dec.refreshDevices() })
 // ---- Spectrum display -----------------------------------------------------------
 
 const spectrumCanvas = ref<HTMLCanvasElement>()
+/** displayed span — 2000 Hz wide so an off-centre station is visible before it is tuned */
 const F_LO = 200
-const F_HI = 1600
+const F_HI = 2200
+/** the pitch can be set anywhere the spectrum shows; the slider shares these limits */
+const PITCH_MIN = F_LO
+const PITCH_MAX = F_HI
+const BW_MIN = 25
+const BW_MAX = 400
 let spectrumRaf = 0
 let spectrumBuf: Float32Array | null = null
 let peakHold: Float32Array | null = null
@@ -251,7 +256,8 @@ function drawSpectrum() {
   g.stroke()
   g.setLineDash([])
   g.fillStyle = 'rgb(110, 231, 183)'
-  g.fillText(`${centre} Hz`, Math.min(w - 52, xc + 4), 11)
+  const label = `${centre} Hz · ${bw} Hz wide`
+  g.fillText(label, Math.max(2, Math.min(w - g.measureText(label).width - 4, xc + 4)), 11)
 
   spectrumRaf = requestAnimationFrame(drawSpectrum)
 }
@@ -262,7 +268,7 @@ function tuneFromEvent(e: PointerEvent) {
   const rect = canvas.getBoundingClientRect()
   const frac = (e.clientX - rect.left) / rect.width
   const hz = Math.round((F_LO + frac * (F_HI - F_LO)) / 10) * 10
-  s.value.centerHz = Math.min(1000, Math.max(400, hz))
+  s.value.centerHz = Math.min(PITCH_MAX, Math.max(PITCH_MIN, hz))
 }
 let dragging = false
 function onSpectrumDown(e: PointerEvent) {
@@ -272,28 +278,78 @@ function onSpectrumDown(e: PointerEvent) {
 }
 function onSpectrumMove(e: PointerEvent) { if (dragging) tuneFromEvent(e) }
 function onSpectrumUp() { dragging = false }
+/** Mouse wheel over the display: narrow (up) or widen (down) the passband, 10 Hz a notch */
+function onSpectrumWheel(e: WheelEvent) {
+  if (e.deltaY === 0) return
+  const step = e.deltaY > 0 ? 10 : -10
+  const bw = Math.round((s.value.bandwidthHz + step) / 5) * 5
+  s.value.bandwidthHz = Math.min(BW_MAX, Math.max(BW_MIN, bw))
+}
 
-/** Snap the centre to the strongest tone in the CW range — one-click tuning */
-function tuneToPeak() {
-  if (!spectrumBuf) return
+/**
+ * Where the strongest tone on the display sits, with parabolic interpolation
+ * between bins. `prominenceDb` asks that it stand that far over the median of
+ * the display — static has no such peak, so a held button does not wander.
+ */
+function strongestToneHz(prominenceDb: number): number | null {
+  if (!spectrumBuf) return null
   const info = dec.spectrum(spectrumBuf)
-  if (!info) return
+  if (!info) return null
   let best = -1
   let bestDb = -Infinity
-  const i0 = Math.ceil(350 / info.binHz)
-  const i1 = Math.floor(1050 / info.binHz)
+  const i0 = Math.max(1, Math.ceil(PITCH_MIN / info.binHz))
+  const i1 = Math.min(spectrumBuf.length - 2, Math.floor(PITCH_MAX / info.binHz))
   for (let i = i0; i <= i1; i++) {
     if (spectrumBuf[i]! > bestDb) { bestDb = spectrumBuf[i]!; best = i }
   }
-  if (best > 0) {
-    // parabolic interpolation between neighbouring bins for sub-bin accuracy
-    const a = spectrumBuf[best - 1]!
-    const b = spectrumBuf[best]!
-    const c = spectrumBuf[best + 1]!
-    const denom = a - 2 * b + c
-    const offset = denom !== 0 ? (0.5 * (a - c)) / denom : 0
-    s.value.centerHz = Math.min(1000, Math.max(400, Math.round(((best + offset) * info.binHz) / 5) * 5))
+  if (best < 1) return null
+  if (prominenceDb > 0) {
+    const sorted = Array.from(spectrumBuf.subarray(i0, i1 + 1)).sort((a, b) => a - b)
+    const median = sorted[sorted.length >> 1]!
+    if (bestDb - median < prominenceDb) return null
   }
+  const a = spectrumBuf[best - 1]!
+  const b = spectrumBuf[best]!
+  const c = spectrumBuf[best + 1]!
+  const denom = a - 2 * b + c
+  const offset = denom !== 0 ? (0.5 * (a - c)) / denom : 0
+  return Math.min(PITCH_MAX, Math.max(PITCH_MIN, Math.round(((best + offset) * info.binHz) / 5) * 5))
+}
+
+/** Snap the centre to the strongest tone on the display — one-click tuning */
+function tuneToPeak() {
+  const hz = strongestToneHz(0)
+  if (hz !== null) s.value.centerHz = hz
+}
+
+// Holding the button keeps re-tuning every PEAK_HOLD_MS, so the operator can
+// hold it while the signal comes up and let go when the passband sits right.
+// Repeats only follow a peak that clearly stands out of the noise, so a dead
+// band does not drag the pitch about.
+const PEAK_HOLD_MS = 350
+const PEAK_HOLD_PROMINENCE_DB = 6
+let peakHoldTimer = 0
+let peakHoldActive = false
+function startPeakHold() {
+  if (!dec.listening.value) return
+  peakHoldActive = true
+  tuneToPeak()
+  stopPeakHoldTimer()
+  peakHoldTimer = window.setInterval(() => {
+    const hz = strongestToneHz(PEAK_HOLD_PROMINENCE_DB)
+    if (hz !== null && Math.abs(hz - s.value.centerHz) >= 10) s.value.centerHz = hz
+  }, PEAK_HOLD_MS)
+}
+function stopPeakHoldTimer() {
+  if (peakHoldTimer) { window.clearInterval(peakHoldTimer); peakHoldTimer = 0 }
+}
+function stopPeakHold() {
+  stopPeakHoldTimer()
+  // the click that follows a press has already tuned; keyboard activation (no pointer) tunes below
+  window.setTimeout(() => { peakHoldActive = false }, 0)
+}
+function onPeakClick(e: MouseEvent) {
+  if (e.detail === 0 && !peakHoldActive) tuneToPeak()
 }
 
 onMounted(() => {
@@ -301,6 +357,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   cancelAnimationFrame(spectrumRaf)
+  stopPeakHoldTimer()
 })
 
 // ---- Meter & readouts ------------------------------------------------------------
@@ -370,9 +427,6 @@ const showAdvanced = ref(false)
 function reseedSpeed() {
   dec.resetTiming()
 }
-function matchRigPitch() {
-  s.value.centerHz = progress.value.settings.freq
-}
 
 </script>
 
@@ -410,31 +464,39 @@ function matchRigPitch() {
       <div class="space-y-6">
         <!-- Signal display -->
         <UCard>
-          <!-- readouts sit beside the spectrum only where the half-width column is wide enough -->
-          <div class="grid gap-4 2xl:grid-cols-[1fr_auto]">
+          <div class="space-y-4">
             <div class="space-y-3">
               <div class="flex flex-wrap items-center justify-between gap-2">
                 <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">
-                  Spectrum · click or drag to tune
+                  Spectrum · click or drag to tune · wheel sets bandwidth
                 </div>
-                <div class="flex gap-1.5">
-                  <UButton size="xs" variant="soft" color="neutral" icon="i-lucide-crosshair" class="whitespace-nowrap" :disabled="!dec.listening.value" @click="tuneToPeak">
-                    Tune to peak
-                  </UButton>
-                  <UButton size="xs" variant="soft" color="neutral" icon="i-lucide-music-2" class="whitespace-nowrap" @click="matchRigPitch">
-                    Rig pitch {{ progress.settings.freq }} Hz
-                  </UButton>
-                </div>
+                <UButton
+                  size="xs"
+                  variant="soft"
+                  color="neutral"
+                  icon="i-lucide-crosshair"
+                  class="select-none whitespace-nowrap touch-none"
+                  :disabled="!dec.listening.value"
+                  title="Click to snap the pitch to the strongest tone. Hold to keep following it until the passband sits right."
+                  @pointerdown="startPeakHold"
+                  @pointerup="stopPeakHold"
+                  @pointerleave="stopPeakHold"
+                  @pointercancel="stopPeakHold"
+                  @click="onPeakClick"
+                >
+                  Tune to peak
+                </UButton>
               </div>
               <canvas
                 ref="spectrumCanvas"
-                class="h-36 w-full cursor-crosshair touch-none rounded-md border border-zinc-800 bg-zinc-950"
+                class="h-40 w-full cursor-crosshair touch-none rounded-md border border-zinc-800 bg-zinc-950"
                 role="img"
-                :aria-label="`Audio spectrum 200 to 1600 Hz, passband centred at ${s.centerHz} Hz, ${s.bandwidthHz} Hz wide`"
+                :aria-label="`Audio spectrum ${F_LO} to ${F_HI} Hz, passband centred at ${s.centerHz} Hz, ${s.bandwidthHz} Hz wide`"
                 @pointerdown="onSpectrumDown"
                 @pointermove="onSpectrumMove"
                 @pointerup="onSpectrumUp"
                 @pointercancel="onSpectrumUp"
+                @wheel.prevent="onSpectrumWheel"
               />
 
               <!-- Level meter with the decoder's marks -->
@@ -487,8 +549,8 @@ function matchRigPitch() {
               </div>
             </div>
 
-            <!-- Readouts -->
-            <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 2xl:w-56 2xl:grid-cols-1">
+            <!-- Readouts: speed, report, elements in a row under the meter -->
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
               <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2">
                 <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Speed</div>
                 <div class="text-2xl font-semibold text-emerald-400">
@@ -529,7 +591,7 @@ function matchRigPitch() {
                 </div>
               </div>
               <!-- element ribbon: the last few dits/dahs as bars -->
-              <div class="col-span-2 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2 lg:col-span-1">
+              <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2">
                 <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Elements</div>
                 <div class="mt-1.5 flex h-4 items-center gap-0.5 overflow-hidden">
                   <span
@@ -805,14 +867,14 @@ function matchRigPitch() {
                 <span>Centre pitch</span>
                 <span class="font-mono text-emerald-400">{{ s.centerHz }} Hz</span>
               </div>
-              <USlider v-model="s.centerHz" :min="300" :max="1500" :step="10" />
+              <USlider v-model="s.centerHz" :min="PITCH_MIN" :max="PITCH_MAX" :step="10" />
             </div>
             <div>
               <div class="mb-1 flex items-center justify-between text-sm">
                 <span>Bandwidth <span class="text-zinc-500">(pre-filter Q ≈ {{ prefilterQ }})</span></span>
                 <span class="font-mono text-emerald-400">{{ s.bandwidthHz }} Hz</span>
               </div>
-              <USlider v-model="s.bandwidthHz" :min="25" :max="400" :step="5" />
+              <USlider v-model="s.bandwidthHz" :min="BW_MIN" :max="BW_MAX" :step="5" />
               <p class="mt-1 text-xs leading-snug text-zinc-500">
                 Narrow to reject QRM; widen for fast code or a drifting signal. 100 Hz suits most 15–30 WPM copy.
               </p>
