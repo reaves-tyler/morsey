@@ -221,16 +221,16 @@ const mobileLinks = [
         <NuxtPage />
       </main>
 
-      <footer class="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 border-t border-zinc-800/80 py-4 pb-14 text-center font-mono text-xs text-zinc-600">
-        <span>73 DE MORSEY <span class="text-zinc-700">·-·-·</span> Free &amp; open-source CW trainer — Koch method · Farnsworth timing</span>
-        <NuxtLink to="/about" class="text-zinc-500 transition hover:text-emerald-400">
+      <footer class="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 border-t border-zinc-800/80 py-4 pb-14 text-center font-mono text-xs text-zinc-500">
+        <span>73 DE MORSEY <span class="text-zinc-500">·-·-·</span> Free &amp; open-source CW trainer — Koch method · Farnsworth timing</span>
+        <NuxtLink to="/about" class="text-zinc-400 transition hover:text-emerald-400">
           About &amp; FAQ
         </NuxtLink>
         <a
           href="https://github.com/reaves-tyler/morsey"
           target="_blank"
           rel="noopener noreferrer"
-          class="inline-flex items-center gap-1 text-zinc-500 transition hover:text-emerald-400"
+          class="inline-flex items-center gap-1 text-zinc-400 transition hover:text-emerald-400"
           aria-label="Morsey on GitHub"
         >
           <UIcon name="i-lucide-github" class="size-3.5" />

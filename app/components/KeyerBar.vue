@@ -113,14 +113,14 @@ async function connect() {
                   <div class="flex items-center gap-3">
                     <span class="w-14 shrink-0 font-mono text-[10px] uppercase tracking-widest text-zinc-500" title="Atmospheric static">QRN</span>
                     <USlider v-model="s.qrnLevel" :min="0" :max="1" :step="0.05" size="sm" class="flex-1" />
-                    <span class="w-16 shrink-0 text-right font-mono text-xs" :class="s.qrnLevel > 0 ? 'text-amber-400' : 'text-zinc-600'">
+                    <span class="w-16 shrink-0 text-right font-mono text-xs" :class="s.qrnLevel > 0 ? 'text-amber-400' : 'text-zinc-500'">
                       {{ s.qrnLevel > 0 ? Math.round(s.qrnLevel * 100) + '%' : 'OFF' }}
                     </span>
                   </div>
                   <div class="flex items-center gap-3">
                     <span class="w-14 shrink-0 font-mono text-[10px] uppercase tracking-widest text-zinc-500" title="Signal fading">QSB</span>
                     <USlider v-model="s.qsbDepth" :min="0" :max="0.9" :step="0.05" size="sm" class="flex-1" />
-                    <span class="w-16 shrink-0 text-right font-mono text-xs" :class="s.qsbDepth > 0 ? 'text-amber-400' : 'text-zinc-600'">
+                    <span class="w-16 shrink-0 text-right font-mono text-xs" :class="s.qsbDepth > 0 ? 'text-amber-400' : 'text-zinc-500'">
                       {{ s.qsbDepth > 0 ? Math.round(s.qsbDepth * 100) + '%' : 'OFF' }}
                     </span>
                   </div>
@@ -155,7 +155,7 @@ async function connect() {
                 {{ keyer.serialConnected.value ? 'Connected ●' : 'Connect' }}
               </button>
               <p v-if="serialError" class="mt-2 max-w-44 text-xs leading-snug text-rose-400">{{ serialError }}</p>
-              <p v-else class="mt-2 max-w-44 text-xs leading-snug text-zinc-600">
+              <p v-else class="mt-2 max-w-44 text-xs leading-snug text-zinc-500">
                 Any key plugs into the Pico bridge — the bridge passes raw contacts through; this panel decides what they mean.
               </p>
 
@@ -164,17 +164,17 @@ async function connect() {
               <div class="mt-3 border-t border-zinc-800 pt-3">
                 <div class="mb-2 font-mono text-[10px] uppercase tracking-widest text-zinc-500">Contact test</div>
                 <div class="flex items-center gap-4">
-                  <span class="flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider" :class="keyer.tipActive.value ? 'text-emerald-300' : 'text-zinc-600'">
+                  <span class="flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider" :class="keyer.tipActive.value ? 'text-emerald-300' : 'text-zinc-500'">
                     <span class="size-2.5 rounded-full transition" :class="keyer.tipActive.value ? 'bg-emerald-400 shadow-[0_0_8px_theme(colors.emerald.400)]' : 'bg-zinc-700'" />
                     Tip
                   </span>
-                  <span class="flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider" :class="keyer.ringActive.value ? 'text-emerald-300' : 'text-zinc-600'">
+                  <span class="flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider" :class="keyer.ringActive.value ? 'text-emerald-300' : 'text-zinc-500'">
                     <span class="size-2.5 rounded-full transition" :class="keyer.ringActive.value ? 'bg-emerald-400 shadow-[0_0_8px_theme(colors.emerald.400)]' : 'bg-zinc-700'" />
                     Ring
                   </span>
                 </div>
-                <p v-if="keyer.serialConnected.value" class="mt-2 font-mono text-[11px] text-zinc-600">
-                  <span :class="keyer.bridgeReady.value ? 'text-emerald-400' : 'text-zinc-600'">
+                <p v-if="keyer.serialConnected.value" class="mt-2 font-mono text-[11px] text-zinc-500">
+                  <span :class="keyer.bridgeReady.value ? 'text-emerald-400' : 'text-zinc-500'">
                     {{ keyer.bridgeReady.value ? 'BRIDGE READY' : 'awaiting bridge…' }}
                   </span>
                   · {{ keyer.bridgeEvents.value }} events
@@ -225,7 +225,7 @@ async function connect() {
           class="rounded-sm border px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider"
           :class="keyer.serialConnected.value
             ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
-            : 'border-zinc-800 bg-zinc-900 text-zinc-600'"
+            : 'border-zinc-800 bg-zinc-900 text-zinc-500'"
         >
           USB {{ keyer.serialConnected.value ? '●' : '○' }}
         </span>

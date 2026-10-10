@@ -43,6 +43,15 @@ export default defineNuxtConfig({
       }
     ]
   },
+  ui: {
+    theme: {
+      // Only the semantic colours the templates use. Nuxt UI emits the
+      // utilities for every variant of every theme colour into the one
+      // render-blocking stylesheet, so each unused colour (secondary,
+      // success, info, warning by default) is dead CSS on every page.
+      colors: ['primary', 'error', 'neutral']
+    }
+  },
   colorMode: {
     preference: 'dark',
     fallback: 'dark'

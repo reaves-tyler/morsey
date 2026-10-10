@@ -80,7 +80,7 @@ const modules = computed(() => [
         Morsey is a free, open-source CW trainer for amateur radio. Characters at full speed, spacing that
         grows with you, a real key when you're ready, and a live decoder for your rig — all in the browser,
         no account, works offline.
-        <NuxtLink to="/about" class="text-emerald-400 hover:underline">How it works</NuxtLink>
+        <NuxtLink to="/about" class="text-emerald-400 underline decoration-emerald-400/40 underline-offset-2 hover:decoration-emerald-400">How it works</NuxtLink>
       </p>
     </section>
 
@@ -168,7 +168,7 @@ const modules = computed(() => [
           class="flex size-8 items-center justify-center rounded-md font-mono text-sm"
           :class="i < unlockedChars.length
             ? 'bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30'
-            : 'bg-zinc-900 text-zinc-600'"
+            : 'bg-zinc-900 text-zinc-500'"
         >
           {{ char }}
         </span>

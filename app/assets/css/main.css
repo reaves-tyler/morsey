@@ -1,6 +1,15 @@
 @import "tailwindcss";
 @import "@nuxt/ui";
 
+/* Muted text is one notch lighter than Tailwind's zinc-500 (#71717b): the
+   stock tone reads 4.1:1 on zinc-950, under the WCAG AA 4.5:1 that Lighthouse
+   measures as a contrast failure on every label and caption. #85858f is 5.5:1
+   on zinc-950 and 4.9:1 on zinc-900 while staying clearly under zinc-400
+   (#a1a1aa), so the hierarchy holds. Body text below zinc-500 fails AA. */
+@theme {
+  --color-zinc-500: #85858f;
+}
+
 :root {
   --ui-bg: var(--color-zinc-950);
 }
