@@ -432,9 +432,22 @@ function overAge(o: { endedMs: number }) {
 function overLabel(o: { call: string | null; text: string }) {
   return o.call ?? (o.text.length > 18 ? `${o.text.slice(0, 18)}…` : o.text)
 }
-const oversTitle = computed(() => dec.overs.value
-  .map(o => `RST ${o.rst} · ${overStrength(o)} · ${Math.round(o.snrDb)} dB S/N · ${overAge(o)} · ${o.text.length > 40 ? `${o.text.slice(0, 40)}…` : o.text}`)
-  .join('\n'))
+/** the overs listed in the hover tip, newest first */
+const oversHistory = computed(() => dec.overs.value.map(o => ({
+  key: o.endedMs,
+  rst: o.rst,
+  detail: `${overStrength(o)} · ${Math.round(o.snrDb)} dB S/N · ${overAge(o)}`,
+  text: o.text.length > 48 ? `${o.text.slice(0, 48)}…` : o.text
+})))
+// One fixed, Teleported tooltip like the terminal's — a native `title` re-opens
+// every time its text changes, and the age in it changes every second.
+const oversTip = ref<{ x: number; y: number; below: boolean } | null>(null)
+function showOversTip(e: MouseEvent) {
+  const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+  const below = r.top < 160
+  oversTip.value = { x: r.left, y: below ? r.bottom + 6 : r.top - 6, below }
+}
+function hideOversTip() { oversTip.value = null }
 const prefilterQ = computed(() => Math.min(50, Math.max(5, s.value.centerHz / Math.max(20, s.value.bandwidthHz * 2))).toFixed(0))
 /** the spacing the decoder has measured, in dits — what the letter/word break trims act on */
 const spacingText = computed(() => {
@@ -752,8 +765,9 @@ function reseedSpeed() {
               </div>
             </div>
 
-            <!-- Readouts: speed, report, elements in a row under the meter -->
-            <div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <!-- Readouts under the meter: speed and elements stacked on the left, the signal report on the right -->
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <div class="flex flex-col gap-2">
               <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2">
                 <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Speed</div>
                 <div class="text-2xl font-semibold text-emerald-400">
@@ -763,6 +777,21 @@ function reseedSpeed() {
                   dit {{ Math.round(m.ditMs) }} ms · dah {{ Math.round(m.dahMs) }} ms · {{ ratio }}:1
                   <span v-if="!m.calibrated && dec.listening.value" class="text-amber-400"> · seeding</span>
                 </div>
+              </div>
+              <!-- element ribbon: the last few dits/dahs as bars -->
+              <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2">
+                <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Elements</div>
+                <div class="mt-1.5 flex h-4 items-center gap-0.5 overflow-hidden">
+                  <span
+                    v-for="(e, i) in dec.elements.value.slice(-24)"
+                    :key="i"
+                    class="h-2.5 shrink-0 rounded-sm bg-emerald-400/80"
+                    :style="{ width: e.el === '-' ? '14px' : '5px' }"
+                    :title="`${e.el} ${Math.round(e.ms)} ms`"
+                  />
+                  <span v-if="dec.elements.value.length === 0" class="font-mono text-[11px] text-zinc-600">—</span>
+                </div>
+              </div>
               </div>
               <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2" title="Readability from decode quality (unknown patterns, timing confidence) and S/N · Strength from signal-over-noise (6 dB per S-unit, noise ≈ S3) · Tone assumed 9">
                 <div class="flex items-center justify-between font-mono text-[10px] uppercase tracking-widest text-zinc-500">
@@ -796,27 +825,34 @@ function reseedSpeed() {
                 <div
                   v-if="lastOver"
                   class="mt-1.5 flex flex-wrap items-baseline gap-x-2 border-t border-zinc-800 pt-1.5 font-mono text-[11px]"
-                  :title="`The report measured while the last over was being printed — send this one. Earlier overs:\n${oversTitle}`"
+                  @mouseenter="showOversTip"
+                  @mouseleave="hideOversTip"
                 >
                   <span class="uppercase tracking-widest text-zinc-500">Last over</span>
                   <span class="text-base font-semibold text-sky-300">RST {{ lastOver.rst }}</span>
                   <span class="text-zinc-500">{{ overStrength(lastOver) }} · {{ overAge(lastOver) }}</span>
                   <span v-if="overLabel(lastOver)" class="truncate text-zinc-400">{{ overLabel(lastOver) }}</span>
                 </div>
-              </div>
-              <!-- element ribbon: the last few dits/dahs as bars -->
-              <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2">
-                <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Elements</div>
-                <div class="mt-1.5 flex h-4 items-center gap-0.5 overflow-hidden">
-                  <span
-                    v-for="(e, i) in dec.elements.value.slice(-24)"
-                    :key="i"
-                    class="h-2.5 shrink-0 rounded-sm bg-emerald-400/80"
-                    :style="{ width: e.el === '-' ? '14px' : '5px' }"
-                    :title="`${e.el} ${Math.round(e.ms)} ms`"
-                  />
-                  <span v-if="dec.elements.value.length === 0" class="font-mono text-[11px] text-zinc-600">—</span>
-                </div>
+                <Teleport to="body">
+                  <div
+                    v-if="oversTip"
+                    class="pointer-events-none fixed z-50 w-80 max-w-[calc(100vw-2rem)] rounded border border-zinc-700 bg-zinc-900 px-3 py-2 font-sans text-xs text-zinc-100 shadow-lg"
+                    :class="oversTip.below ? '' : '-translate-y-full'"
+                    :style="{ left: `${oversTip.x}px`, top: `${oversTip.y}px` }"
+                    role="tooltip"
+                  >
+                    <p class="mb-1.5 text-zinc-300">The report measured while the last over was being printed — send this one.</p>
+                    <ol class="space-y-1">
+                      <li v-for="o in oversHistory" :key="o.key" class="grid grid-cols-[auto_1fr] gap-x-2">
+                        <span class="font-mono font-semibold text-sky-300">{{ o.rst }}</span>
+                        <span class="min-w-0">
+                          <span class="font-mono text-zinc-400">{{ o.detail }}</span>
+                          <span class="block truncate font-mono text-emerald-200/80">{{ o.text }}</span>
+                        </span>
+                      </li>
+                    </ol>
+                  </div>
+                </Teleport>
               </div>
             </div>
           </div>
