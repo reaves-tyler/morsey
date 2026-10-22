@@ -1,4 +1,5 @@
 import { CwDecoder, DEFAULT_DECODER_CONFIG, type CwDecoderConfig, type CwDecoderState } from '~/utils/cwDecoder'
+import { highlightCw } from '~/utils/cwHighlight'
 import { toInt16, wavHeader16 } from '~/utils/cwSynth'
 import { MonitorAgc, MONITOR_AGC_LOOKAHEAD_MS } from '~/utils/monitorAgc'
 
@@ -165,6 +166,28 @@ export interface SignalReport {
 }
 
 /**
+ * The signal report of one over, as it stood while that over was being
+ * decoded. The live report follows whatever is on frequency now — by the
+ * time the operator keys up to send a report, the other station has stopped
+ * and the operator's own sidetone is the strongest thing in the passband —
+ * so each over's report is kept when the terminal line ends, and the latest
+ * stays on the tile until the next over replaces it.
+ */
+export interface OverReport {
+  rst: string
+  r: number
+  s: number
+  plusDb: number
+  snrDb: number
+  /** decoder time (ms) of the last character of the over — ages against `meter.timeMs` */
+  endedMs: number
+  /** what was copied in it, trimmed */
+  text: string
+  /** the first callsign heard in it, if any */
+  call: string | null
+}
+
+/**
  * The worklets are tiny and dependency-free, so they ship inline as a Blob —
  * no base-URL or precache concerns. The leveller embeds the pure MonitorAgc
  * class verbatim (it is written to be self-contained for exactly this; the
@@ -286,6 +309,14 @@ const RECORD_LIMIT_BYTES = 60 * 1024 * 1024
 const elements = ref<{ el: '.' | '-'; ms: number }[]>([])
 /** last decoded characters: true = known pattern (for the readability estimate) */
 const recentChars = ref<boolean[]>([])
+/** reports of the last few overs, newest first — see OverReport */
+const overs = ref<OverReport[]>([])
+const OVERS_KEPT = 5
+/** the over in progress: its text, when its last character landed, and the report while it was decoding */
+let overText = ''
+let overLastCharMs = 0
+let overReport: SignalReport | null = null
+let overSnrDb = 0
 
 let ctx: AudioContext | null = null
 let decoder: CwDecoder | null = null
@@ -487,11 +518,17 @@ export function useCwStreamDecoder() {
           // A pattern that matches no character is usually two letters run
           // together; the log keeps the elements that were heard, `{.-.-..}`,
           // so the operator (and the highlighter's guesses) can still read them
-          text.value += ch === '*' && pat ? `{${pat}}` : ch
+          const printed = ch === '*' && pat ? `{${pat}}` : ch
+          text.value += printed
+          overText += printed
+          overLastCharMs = lastKeyMs
           recentChars.value.push(ch !== '*')
           if (recentChars.value.length > 20) recentChars.value.shift()
         },
-        onWordGap: () => { if (text.value && !/[ \n]$/.test(text.value)) text.value += ' ' },
+        onWordGap: () => {
+          if (text.value && !/[ \n]$/.test(text.value)) text.value += ' '
+          overText += ' '
+        },
         onPattern: (p) => { pattern.value = p },
         onKey: (_down, atMs) => { lastKeyMs = atMs },
         onElement: (el, ms) => {
@@ -718,12 +755,45 @@ export function useCwStreamDecoder() {
   function newline() {
     const t = text.value.replace(/ +$/, '')
     if (t && !t.endsWith('\n')) text.value = t + '\n'
+    endOver()
+  }
+
+  /**
+   * Whose over it was: the callsign after DE ("W1AW DE KR4NZN" is KR4NZN
+   * talking), else the last callsign heard, else nothing.
+   */
+  function senderOf(copied: string): string | null {
+    const tokens = highlightCw(copied)
+    const de = tokens.findIndex(t => t.kind === 'abbr' && t.text === 'DE')
+    const after = de >= 0 ? tokens.slice(de + 1).find(t => t.kind === 'callsign') : undefined
+    if (after) return after.text
+    const calls = tokens.filter(t => t.kind === 'callsign')
+    return calls.length ? calls[calls.length - 1]!.text : null
+  }
+
+  /** The terminal line has ended: keep the over's report (if anything was copied in it). */
+  function endOver() {
+    const copied = overText.trim()
+    if (copied && overReport && overReport.rst !== '—') {
+      const call = senderOf(copied)
+      overs.value = [
+        { rst: overReport.rst, r: overReport.r, s: overReport.s, plusDb: overReport.plusDb, snrDb: overSnrDb, endedMs: overLastCharMs, text: copied, call },
+        ...overs.value
+      ].slice(0, OVERS_KEPT)
+    }
+    overText = ''
+    overReport = null
   }
 
   let lastHold = ''
   function tick() {
     if (decoder) {
       meter.value = decoder.getState()
+      // the over's report is the live one as long as it is being printed
+      if (meter.value.decoding) {
+        overReport = { ...report.value }
+        overSnrDb = meter.value.snrDb
+      }
       if (meter.value.timeMs - lastKeyMs >= IDLE_NEWLINE_MS) newline()
       // why keying is not being printed — in the console too, for bug reports
       const hold = meter.value.hold
@@ -895,6 +965,7 @@ export function useCwStreamDecoder() {
 
   function stop() {
     decoder?.flush()
+    endOver()
     // the take survives a Stop: nothing is exported or dropped without the operator asking
     pauseRecording()
     teardownSource()
@@ -1036,7 +1107,7 @@ export function useCwStreamDecoder() {
   return {
     // state
     listening, suspended, source, text, pattern, error, devices, outputs, devicesLabelled, suggestedLineDevice, canSelectOutput,
-    fileName, playbackProgress, latencyMs, monitorGainDb, meter, elements, settings, report,
+    fileName, playbackProgress, latencyMs, monitorGainDb, meter, elements, settings, report, overs,
     recording, recordingState, recordedSeconds, recordedBytes,
     // actions
     start, stop, clear, loadFile, refreshDevices, requestDevicePermission, resetTiming, resetTimingSettings, resetFilter, resetLevels, resetSettings, resetTrims, spectrum, spectrumBins,

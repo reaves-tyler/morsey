@@ -416,6 +416,25 @@ const strengthText = computed(() => {
   if (r.s === 0) return '—'
   return r.plusDb > 0 ? `S9 +${r.plusDb} dB` : `S${r.s}`
 })
+
+// ---- Last over ------------------------------------------------------------------
+// The report to send back: what the other station measured while it was being
+// printed, held after it stops — the live one above has moved on to the band
+// noise, or to the operator's own sidetone, by the time they key up.
+const lastOver = computed(() => dec.overs.value[0] ?? null)
+function overStrength(o: { s: number; plusDb: number }) {
+  return o.plusDb > 0 ? `S9 +${o.plusDb} dB` : `S${o.s}`
+}
+function overAge(o: { endedMs: number }) {
+  const sec = Math.max(0, Math.round((m.value.timeMs - o.endedMs) / 1000))
+  return sec < 60 ? `${sec} s ago` : `${Math.floor(sec / 60)} min ${sec % 60} s ago`
+}
+function overLabel(o: { call: string | null; text: string }) {
+  return o.call ?? (o.text.length > 18 ? `${o.text.slice(0, 18)}…` : o.text)
+}
+const oversTitle = computed(() => dec.overs.value
+  .map(o => `RST ${o.rst} · ${overStrength(o)} · ${Math.round(o.snrDb)} dB S/N · ${overAge(o)} · ${o.text.length > 40 ? `${o.text.slice(0, 40)}…` : o.text}`)
+  .join('\n'))
 const prefilterQ = computed(() => Math.min(50, Math.max(5, s.value.centerHz / Math.max(20, s.value.bandwidthHz * 2))).toFixed(0))
 /** the spacing the decoder has measured, in dits — what the letter/word break trims act on */
 const spacingText = computed(() => {
@@ -772,6 +791,17 @@ function reseedSpeed() {
                 </div>
                 <div class="mt-1 font-mono text-[11px] text-zinc-500">
                   copy {{ Math.round(report.copyQuality * 100) }}% · timing {{ Math.round(report.confidence * 100) }}% · gaps {{ Math.round(m.letterGapMs) }}/{{ Math.round(m.wordGapMs) }} ms
+                </div>
+                <!-- the report to send back: held from the last over, not the live meter -->
+                <div
+                  v-if="lastOver"
+                  class="mt-1.5 flex flex-wrap items-baseline gap-x-2 border-t border-zinc-800 pt-1.5 font-mono text-[11px]"
+                  :title="`The report measured while the last over was being printed — send this one. Earlier overs:\n${oversTitle}`"
+                >
+                  <span class="uppercase tracking-widest text-zinc-500">Last over</span>
+                  <span class="text-base font-semibold text-sky-300">RST {{ lastOver.rst }}</span>
+                  <span class="text-zinc-500">{{ overStrength(lastOver) }} · {{ overAge(lastOver) }}</span>
+                  <span v-if="overLabel(lastOver)" class="truncate text-zinc-400">{{ overLabel(lastOver) }}</span>
                 </div>
               </div>
               <!-- element ribbon: the last few dits/dahs as bars -->
