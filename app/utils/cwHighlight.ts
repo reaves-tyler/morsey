@@ -1,4 +1,6 @@
 import { PHRASE_TIERS, COMMON_ABBREVIATIONS } from '~/utils/abbreviations'
+import { splitPattern } from '~/utils/cwSplit'
+import { CALLSIGN_ENTITIES } from '~/utils/callsigns'
 
 /**
  * Syntax highlighting for decoded CW.
@@ -33,6 +35,23 @@ export interface HighlightToken {
   kind: TokenKind
   /** hover tip — the meaning, present for every highlighted kind */
   tip?: string
+  /** an `unknown` written as `{.-.-..}`: the elements that were heard */
+  pattern?: string
+  /** …and the readings they could be if a letter gap was missed, best first */
+  guesses?: string[]
+}
+
+/** The decoder's unknown character with the elements it heard, as the stream adapter writes it */
+export function unknownToken(pattern: string): HighlightToken {
+  // Fewest cuts first, but a reading that is itself something an operator
+  // would recognise — a callsign, CQ, a Q-signal — outranks a shorter one
+  // that is just letters: W1AW run together reads as P9Y with one cut fewer.
+  const candidates = splitPattern(pattern, Infinity)
+  const guesses = [...candidates.filter(isRecognised), ...candidates.filter(g => !isRecognised(g))].slice(0, 4)
+  const tip = guesses.length
+    ? `No character is ${pattern} — run together, it could be ${guesses.join(', ')}`
+    : `No character is ${pattern}`
+  return { text: `{${pattern}}`, kind: 'unknown', tip, pattern, guesses }
 }
 
 /** meanings for the prosigns the decoder can print (`PROSIGN_PATTERNS` + the characters AR/BT collide with) */
@@ -124,6 +143,18 @@ export function qrzUrl(word: string): string | null {
   return `https://www.qrz.com/db/${m[1]}${m[2]}${m[3]}`
 }
 
+/** prefixes the callsign generator knows are allocated — the shape alone matches almost any letters-digit-letters */
+const KNOWN_PREFIXES: ReadonlySet<string> = new Set(CALLSIGN_ENTITIES.flatMap(e => e.prefixes))
+
+/** a reading an operator would recognise: a dictionary word, Q-signal, RST, prosign, or a callsign with an allocated prefix */
+function isRecognised(word: string): boolean {
+  const tok = classify(word)
+  if (tok.kind === 'text') return false
+  if (tok.kind !== 'callsign') return true
+  const m = CALLSIGN_RE.exec(word)
+  return !!m && KNOWN_PREFIXES.has(m[1]!)
+}
+
 function classify(word: string): HighlightToken {
   if (word in CHAR_PROSIGNS) return { text: word, kind: 'prosign', tip: CHAR_PROSIGNS[word] }
   const dict = DICTIONARY[word]
@@ -145,15 +176,17 @@ function classifyProsign(tok: string): HighlightToken {
   return tip ? { text: tok, kind: 'prosign', tip: `${tip} (prosign)` } : { text: tok, kind: 'text' }
 }
 
-// prosign, unknown dot, newline, run of spaces, word, then any single other character
-// (a stray `<` or `>` included — every input character must land in some token)
-const TOKEN_RE = /<[A-Z]+>|\*|\n| +|[A-Za-z0-9/]+|[^A-Za-z0-9/* \n]/g
+// prosign, unknown pattern `{.-.-..}` or dot, newline, run of spaces, word, then any
+// single other character (a stray `<`, `>` or `{` included — every input character
+// must land in some token)
+const TOKEN_RE = /<[A-Z]+>|\{[.-]+\}|\*|\n| +|[A-Za-z0-9/]+|[^A-Za-z0-9/* \n]/g
 
 export function highlightCw(text: string): HighlightToken[] {
   const out: HighlightToken[] = []
   for (const tok of text.match(TOKEN_RE) ?? []) {
     if (tok === '\n') out.push({ text: tok, kind: 'newline' })
     else if (tok === '*') out.push({ text: tok, kind: 'unknown', tip: 'Pattern matched no character' })
+    else if (/^\{[.-]+\}$/.test(tok)) out.push(unknownToken(tok.slice(1, -1)))
     else if (tok[0] === ' ') out.push({ text: tok, kind: 'space' })
     else if (tok[0] === '<') out.push(classifyProsign(tok))
     else out.push(classify(tok))

@@ -547,6 +547,36 @@ describe('configuration', () => {
     expect(after.peak).toBeGreaterThan(0.01)
   })
 
+  it('reports the recent marks and the dit/dah boundary the way it classified them', () => {
+    // PARIS at 20 WPM: 10 dits and 4 dahs per word, dit 60 ms, dah 180 ms
+    const { state, elements } = decodeText({ text: 'PARIS PARIS', wpm: 20 })
+    expect(state.markBoundaryMs).toBeCloseTo(Math.sqrt(state.ditMs * state.dahMs), 6)
+    expect(state.recentMarks.length).toBe(12) // the display keeps the last dozen
+    // every reported mark must classify against the boundary as the matching element did
+    const lastElements = elements.slice(-state.recentMarks.length)
+    state.recentMarks.forEach((mark, i) => {
+      expect(mark.ms < state.markBoundaryMs ? '.' : '-').toBe(lastElements[i])
+    })
+    // oldest first, each stamped with a decoder time that does not run backwards
+    for (let i = 1; i < state.recentMarks.length; i++) expect(state.recentMarks[i]!.at).toBeGreaterThanOrEqual(state.recentMarks[i - 1]!.at)
+    expect(state.recentMarks.at(-1)!.at).toBeLessThanOrEqual(state.timeMs)
+    // the marks are the real durations, within the keying envelope's rounding
+    const dits = state.recentMarks.filter(mk => mk.ms < state.markBoundaryMs).map(mk => mk.ms)
+    const dahs = state.recentMarks.filter(mk => mk.ms >= state.markBoundaryMs).map(mk => mk.ms)
+    expect(dits.length).toBeGreaterThan(0)
+    expect(dahs.length).toBeGreaterThan(0)
+    for (const d of dits) expect(Math.abs(d - 60)).toBeLessThan(12)
+    for (const d of dahs) expect(Math.abs(d - 180)).toBeLessThan(12)
+  })
+
+  it('resetTiming forgets the recent marks along with the clusters', () => {
+    const { decoder } = decodeText({ text: 'PARIS', wpm: 20 })
+    expect(decoder.getState().recentMarks.length).toBeGreaterThan(0)
+    decoder.resetTiming()
+    expect(decoder.getState().recentMarks).toEqual([])
+    expect(decoder.getState().calibrated).toBe(false)
+  })
+
   it('recovers when the levels are learned on a tone (listening started mid-mark)', () => {
     // a second of steady carrier first, so the warm-up takes the tone for the noise floor
     const carrier = new Float32Array(FS)

@@ -74,6 +74,19 @@ describe('highlightCw', () => {
     expect(kinds('HW? BK')).toEqual(['HW:abbr', '?:text', 'BK:prosign'])
   })
 
+  it('keeps the elements of a run-on unknown, with guesses at the letters that were run together', () => {
+    const [tok] = highlightCw('{-.-.--.-}')
+    expect(tok).toMatchObject({ text: '{-.-.--.-}', kind: 'unknown', pattern: '-.-.--.-' })
+    expect(tok!.guesses![0]).toBe('CQ')
+    expect(tok!.tip).toMatch(/could be CQ/)
+    // a reading the highlighter recognises outranks a shorter one: W1AW run together, not P9Y
+    expect(highlightCw('{.--.----.-.--}')[0]!.guesses![0]).toBe('W1AW')
+    // reproduced exactly, and a stray brace is plain text
+    for (const s of ['A{.-.-..}B', '{', 'A}', '{}', '{.-x}']) expect(highlightCw(s).map(t => t.text).join('')).toBe(s)
+    expect(kinds('A{.-.-..}B')).toEqual(['A:text', '{.-.-..}:unknown', 'B:text'])
+    expect(kinds('{.-x}').every(k => !k.endsWith(':unknown'))).toBe(true)
+  })
+
   it('marks the unknown-pattern dot and newlines as their own tokens', () => {
     expect(kinds('A*B\nC')).toEqual(['A:text', '*:unknown', 'B:text', '\n:newline', 'C:text'])
   })

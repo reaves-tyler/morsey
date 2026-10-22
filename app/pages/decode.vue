@@ -148,19 +148,31 @@ function selectSource(id: DecoderSource) {
   if (isLive(id) && !dec.devicesLabelled.value) detectDevices()
 }
 
-onMounted(() => { dec.refreshDevices() })
+onMounted(() => {
+  dec.refreshDevices()
+  // Listening is the page's resting state: a live source starts on arrival
+  // (after the remembered device has loaded), so the rig is decoding as soon
+  // as the browser grants the input. A file has nothing to play until chosen.
+  onNuxtReady(() => {
+    if (!dec.listening.value && isLive(dec.source.value)) toggle()
+  })
+})
 
 // ---- Spectrum display -----------------------------------------------------------
 
 const spectrumCanvas = ref<HTMLCanvasElement>()
-/** displayed span — 2000 Hz wide so an off-centre station is visible before it is tuned */
-const F_LO = 200
-const F_HI = 2200
-/** the pitch can be set anywhere the spectrum shows; the slider shares these limits */
-const PITCH_MIN = F_LO
-const PITCH_MAX = F_HI
+/** displayed span — the whole audio passband from DC, so an off-centre station is visible before it is tuned */
+const F_LO = 0
+const F_HI = 2000
 const BW_MIN = 25
 const BW_MAX = 400
+/**
+ * The pitch can be set anywhere the spectrum shows that a detector fits: the
+ * slider and click-tuning share these limits. The floor keeps the widest
+ * passband clear of DC, where there is no tone to decode.
+ */
+const PITCH_MIN = BW_MAX / 2
+const PITCH_MAX = F_HI
 let spectrumRaf = 0
 let spectrumBuf: Float32Array | null = null
 let peakHold: Float32Array | null = null
@@ -371,6 +383,25 @@ const m = dec.meter
 const wpmText = computed(() => (dec.listening.value || dec.text.value ? Math.round(m.value.wpm).toString() : '—'))
 const snrText = computed(() => (m.value.floor > 0 ? `${Math.round(m.value.snrDb)} dB` : '—'))
 const ratio = computed(() => (m.value.dahMs / m.value.ditMs).toFixed(1))
+
+// ---- Element timing bar ------------------------------------------------------------
+// The timing counterpart of the level meter: a log axis of mark length from a
+// 60 WPM dit to a 5 WPM dah, the two tracked clusters and the dit/dah boundary
+// drawn as lines, and each recent mark as a tick that fades, so a fist's
+// scatter — and a mark that fell on the wrong side of the boundary — is visible.
+const TIMING_LO_MS = 1200 / 60
+const TIMING_HI_MS = (1200 / 5) * 3
+const TIMING_FADE_MS = 6000
+function tpct(ms: number) {
+  const f = Math.log(Math.max(ms, TIMING_LO_MS) / TIMING_LO_MS) / Math.log(TIMING_HI_MS / TIMING_LO_MS)
+  return Math.min(100, Math.max(0, f * 100))
+}
+/** where the Expected speed slider's dit would sit */
+const seedDitMs = computed(() => 1200 / s.value.initialWpm)
+function tickStyle(mark: { ms: number; at: number }) {
+  const age = Math.max(0, m.value.timeMs - mark.at)
+  return { left: `${tpct(mark.ms)}%`, opacity: Math.max(0.2, 1 - age / TIMING_FADE_MS) }
+}
 const report = dec.report
 /** S-meter scale: S1–S9 then +10/+20/+30 dB — 12 segments */
 const S_SEGMENTS = [...Array.from({ length: 9 }, (_, i) => `S${i + 1}`), '+10', '+20', '+30']
@@ -403,6 +434,30 @@ watch(() => dec.text.value + dec.pattern.value, async () => {
   if (terminal.value) terminal.value.scrollTop = terminal.value.scrollHeight
 })
 
+// The terminal is resizable by its bottom-right grip (CSS `resize-y`); the
+// height the operator drags it to is remembered per browser, like the cards.
+const TERMINAL_HEIGHT_KEY = 'morsey-decode-terminal-height-v1'
+const TERMINAL_MIN_PX = 160
+const TERMINAL_MAX_PX = 2000
+onMounted(() => {
+  const el = terminal.value
+  if (!el) return
+  try {
+    const h = Number(localStorage.getItem(TERMINAL_HEIGHT_KEY))
+    if (h >= TERMINAL_MIN_PX && h <= TERMINAL_MAX_PX) el.style.height = `${h}px`
+  } catch { /* unavailable storage */ }
+  if (typeof ResizeObserver === 'undefined') return
+  let first = true
+  const ro = new ResizeObserver(() => {
+    // the first callback reports the initial size, not a drag
+    if (first) { first = false; return }
+    const h = Math.round(el.getBoundingClientRect().height)
+    try { localStorage.setItem(TERMINAL_HEIGHT_KEY, String(h)) } catch { /* storage full/unavailable */ }
+  })
+  ro.observe(el)
+  onBeforeUnmount(() => ro.disconnect())
+})
+
 const copied = ref(false)
 async function copyText() {
   try {
@@ -412,18 +467,24 @@ async function copyText() {
   } catch { /* clipboard unavailable */ }
 }
 
-/** the highlight legend under the terminal (colours match CwHighlightedText) */
-const LEGEND = [
-  { label: 'Callsign', cls: 'text-amber-300' },
-  { label: 'Abbreviation', cls: 'text-emerald-400' },
-  { label: 'Q-signal', cls: 'text-cyan-300' },
-  { label: 'RST', cls: 'text-sky-300' },
-  { label: 'Prosign', cls: 'text-violet-300' }
-]
 
-// ---- Advanced ------------------------------------------------------------------------
+// ---- Collapsible control cards ------------------------------------------------------
+// Which of the right-hand cards are open; remembered per browser so a tidy
+// column stays tidy. Source and the filter are what a new operator needs first.
 
-const showAdvanced = ref(false)
+const OPEN_KEY = 'morsey-decode-cards-v1'
+const open = ref({ source: true, filter: true, timing: false, trims: false })
+onMounted(() => {
+  try {
+    const raw = localStorage.getItem(OPEN_KEY)
+    if (raw) open.value = { ...open.value, ...JSON.parse(raw) }
+  } catch { /* unavailable storage */ }
+  watch(open, (o) => {
+    try { localStorage.setItem(OPEN_KEY, JSON.stringify(o)) } catch { /* storage full/unavailable */ }
+  }, { deep: true })
+})
+
+
 function reseedSpeed() {
   dec.resetTiming()
 }
@@ -439,7 +500,76 @@ function reseedSpeed() {
           Live over-the-air CW terminal. Cable the rig into your laptop's aux jack or a USB sound card, or hold a microphone to its speaker — the audio is passed through to your headphones while it decodes. The text is a running log: it survives Stop and reloads, breaks the line after five seconds of silence, and only Clear empties it. Callsigns, Q-signals, RST reports, prosigns and common shorthand are coloured as they arrive; hover one for its meaning.
         </p>
       </div>
-      <div class="flex items-center gap-2">
+      <div class="flex flex-wrap items-center gap-4">
+        <!-- Start / Stop and the recorder: the controls live up here with the status, the cards below are configuration -->
+        <div class="flex flex-wrap items-center gap-3">
+          <UButton
+            size="lg"
+            :color="dec.listening.value ? 'error' : 'primary'"
+            :icon="dec.listening.value ? 'i-lucide-square' : 'i-lucide-play'"
+            :loading="busy"
+            class="font-mono uppercase tracking-wider"
+            @click="toggle"
+          >
+            {{ dec.listening.value ? 'Stop' : 'Start listening' }}
+          </UButton>
+          <!-- recorder: Rec → Pause → Resume / Export / Discard -->
+          <div class="flex items-center gap-1.5">
+            <UButton
+              v-if="rec === 'idle'"
+              size="lg"
+              variant="soft"
+              color="neutral"
+              icon="i-lucide-circle"
+              :disabled="!dec.listening.value"
+              class="font-mono uppercase tracking-wider"
+              title="Record a WAV take of what you are hearing — the monitor signal, levelling and all, before the volume slider. Switch the leveller off to capture the rig's own levels instead."
+              @click="recordOrResume"
+            >
+              Rec
+            </UButton>
+            <UButton
+              v-else-if="rec === 'recording'"
+              size="lg"
+              variant="soft"
+              color="error"
+              icon="i-lucide-pause"
+              class="animate-pulse font-mono uppercase tracking-wider"
+              title="Pause the take"
+              @click="dec.pauseRecording()"
+            >
+              Rec {{ recordLabel }}
+            </UButton>
+            <template v-else>
+              <UButton
+                size="lg"
+                variant="soft"
+                color="error"
+                icon="i-lucide-circle"
+                :disabled="!dec.listening.value"
+                class="font-mono uppercase tracking-wider"
+                :title="dec.listening.value ? 'Resume the take' : 'Start listening to resume the take'"
+                @click="recordOrResume"
+              >
+                {{ recordLabel }}
+              </UButton>
+              <UButton size="lg" variant="soft" color="primary" icon="i-lucide-download" class="font-mono uppercase tracking-wider" title="Download the take as WAV and start fresh" @click="exportRecording">
+                Export
+              </UButton>
+              <UButton size="lg" variant="ghost" color="neutral" icon="i-lucide-trash-2" title="Discard the take" @click="discardRecording" />
+            </template>
+          </div>
+          <p v-if="dec.error.value" class="text-xs leading-snug text-rose-400">{{ dec.error.value }}</p>
+          <p v-else-if="recordNote" class="text-xs leading-snug text-zinc-400">{{ recordNote }}</p>
+          <p v-else-if="dec.listening.value && dec.source.value === 'mic'" class="text-xs leading-snug text-zinc-500">
+            Keyer sidetone is muted while the microphone is live.
+          </p>
+          <p v-else-if="dec.suspended.value" class="text-xs leading-snug text-amber-300/80">
+            The browser is holding the audio until you click or press a key on the page.
+          </p>
+        </div>
+
+        <div class="flex items-center gap-2">
         <span
           class="rounded-sm border px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider"
           :class="dec.listening.value
@@ -456,12 +586,20 @@ function reseedSpeed() {
         >
           Key
         </span>
+        </div>
       </div>
     </section>
 
-    <!-- Two halves on wide screens: the stream on the left, everything that configures it on the right -->
+    <!--
+      Two halves on wide screens: signal display with its configuration under it on the
+      left, the terminal on the right — its height is the right column's own business, so
+      dragging the terminal taller never pushes the configuration cards down. On a phone
+      the left wrapper dissolves (`contents`) and `order` stacks spectrum → terminal →
+      configuration.
+    -->
     <div class="grid items-start gap-6 lg:grid-cols-2">
-      <div class="space-y-6">
+      <div class="contents lg:block lg:space-y-6">
+      <div class="order-1 lg:order-none">
         <!-- Signal display -->
         <UCard>
           <div class="space-y-4">
@@ -501,9 +639,26 @@ function reseedSpeed() {
 
               <!-- Level meter with the decoder's marks -->
               <div>
-                <div class="mb-1 flex items-center justify-between font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+                <div class="mb-1 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+                  <span class="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <span>Tone level in passband</span>
+                    <span class="flex gap-3 normal-case tracking-normal">
+                      <span class="text-zinc-500">▮ floor</span>
+                      <span class="text-amber-400">▮ threshold</span>
+                      <span class="text-emerald-400">▮ peak</span>
+                    </span>
+                  </span>
                   <span class="flex items-center gap-2">
-                    Tone level in passband
+                    <span
+                      v-if="dec.listening.value"
+                      class="rounded px-1.5 py-0.5 normal-case tracking-normal"
+                      :class="m.fsk ? 'bg-amber-500/15 text-amber-300' : m.signalPresent || m.decoding ? 'bg-emerald-500/15 text-emerald-400' : 'bg-zinc-800 text-zinc-500'"
+                      :title="m.fsk
+                        ? 'RTTY on this pitch — two-tone teleprinter, not Morse. Not printed.'
+                        : m.signalPresent || m.decoding
+                          ? 'A keyed signal is on the frequency: copy is being printed.'
+                          : 'Squelched — nothing on the frequency looks like a transmission. Anything the gate catches is held back rather than printed as E and T.'"
+                    >{{ m.fsk ? 'RTTY' : m.signalPresent || m.decoding ? 'Signal' : 'Squelched' }}</span>
                     <UButton
                       size="xs"
                       variant="soft"
@@ -516,21 +671,6 @@ function reseedSpeed() {
                     >
                       Reset levels
                     </UButton>
-                    <span
-                      v-if="dec.listening.value"
-                      class="rounded px-1.5 py-0.5 normal-case tracking-normal"
-                      :class="m.fsk ? 'bg-amber-500/15 text-amber-300' : m.signalPresent || m.decoding ? 'bg-emerald-500/15 text-emerald-400' : 'bg-zinc-800 text-zinc-500'"
-                      :title="m.fsk
-                        ? 'RTTY on this pitch — two-tone teleprinter, not Morse. Not printed.'
-                        : m.signalPresent || m.decoding
-                          ? 'A keyed signal is on the frequency: copy is being printed.'
-                          : 'Squelched — nothing on the frequency looks like a transmission. Anything the gate catches is held back rather than printed as E and T.'"
-                    >{{ m.fsk ? 'RTTY' : m.signalPresent || m.decoding ? 'Signal' : 'Squelched' }}</span>
-                  </span>
-                  <span class="flex gap-3 normal-case tracking-normal">
-                    <span class="text-zinc-500">▮ floor</span>
-                    <span class="text-amber-400">▮ threshold</span>
-                    <span class="text-emerald-400">▮ peak</span>
                   </span>
                 </div>
                 <div class="relative h-5 overflow-hidden rounded border border-zinc-800 bg-zinc-950">
@@ -544,6 +684,50 @@ function reseedSpeed() {
                   <div class="absolute inset-y-0 w-0.5 bg-emerald-400" :style="{ left: pct(m.peak) + '%' }" />
                   <div class="pointer-events-none absolute inset-0 flex items-center justify-between px-2 font-mono text-[9px] text-zinc-600">
                     <span>-60 dB</span><span>-40</span><span>-20</span><span>0</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Element timing: the same picture for the speed tracker -->
+              <div>
+                <div class="mb-1 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+                  <span class="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <span>Element timing</span>
+                    <span class="flex gap-3 normal-case tracking-normal">
+                      <span class="text-zinc-500">┆ seed</span>
+                      <span class="text-emerald-400">▮ dit · dah</span>
+                      <span class="text-amber-400">▮ boundary</span>
+                      <span class="text-zinc-300">▏ marks</span>
+                    </span>
+                  </span>
+                  <span class="flex items-center gap-2">
+                    <span v-if="dec.listening.value" class="rounded px-1.5 py-0.5 normal-case tracking-normal" :class="s.lockSpeed ? 'bg-amber-500/15 text-amber-300' : m.calibrated ? 'bg-emerald-500/15 text-emerald-400' : 'bg-zinc-800 text-zinc-500'">
+                      {{ s.lockSpeed ? 'Locked' : m.calibrated ? 'Tracking' : 'Seeding' }}
+                    </span>
+                    <UButton
+                      size="xs"
+                      variant="soft"
+                      color="neutral"
+                      icon="i-lucide-rotate-ccw"
+                      :disabled="!dec.listening.value || s.lockSpeed"
+                      class="whitespace-nowrap normal-case tracking-normal"
+                      :title="s.lockSpeed
+                        ? 'Speed is locked — unlock it in Timing & noise blanker to re-seed.'
+                        : 'Forget the tracked dit and dah and start again from the expected speed — the next burst re-fits them. Levels and text are kept.'"
+                      @click="dec.resetTiming()"
+                    >
+                      Reset speed
+                    </UButton>
+                  </span>
+                </div>
+                <div class="relative h-5 overflow-hidden rounded border border-zinc-800 bg-zinc-950" title="Each tick is one mark the decoder printed, placed by its length; they fade over a few seconds. Dits should gather on the green line left of the amber boundary, dahs on the one right of it.">
+                  <div v-for="(mark, i) in m.recentMarks" :key="i" class="absolute inset-y-0 w-0.5 bg-zinc-200" :style="tickStyle(mark)" />
+                  <div class="absolute inset-y-0 w-px border-l border-dashed border-zinc-500" :style="{ left: tpct(seedDitMs) + '%' }" />
+                  <div class="absolute inset-y-0 w-0.5 bg-emerald-400" :style="{ left: tpct(m.ditMs) + '%' }" />
+                  <div class="absolute inset-y-0 w-0.5 bg-amber-400" :style="{ left: tpct(m.markBoundaryMs) + '%' }" />
+                  <div class="absolute inset-y-0 w-0.5 bg-emerald-400" :style="{ left: tpct(m.dahMs) + '%' }" />
+                  <div class="pointer-events-none absolute inset-0 flex items-center justify-between px-2 font-mono text-[9px] whitespace-nowrap text-zinc-600">
+                    <span>{{ TIMING_LO_MS }} ms</span><span>{{ TIMING_HI_MS }} ms</span>
                   </div>
                 </div>
               </div>
@@ -607,73 +791,18 @@ function reseedSpeed() {
             </div>
           </div>
         </UCard>
-
-        <!-- Terminal -->
-        <UCard>
-          <div class="mb-2 flex items-center justify-between">
-            <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Decoded text</div>
-            <div class="flex gap-1.5">
-              <UButton size="xs" variant="soft" color="neutral" :icon="copied ? 'i-lucide-check' : 'i-lucide-copy'" :disabled="!dec.text.value" @click="copyText">
-                {{ copied ? 'Copied' : 'Copy' }}
-              </UButton>
-              <UButton size="xs" variant="soft" color="neutral" icon="i-lucide-eraser" :disabled="!dec.text.value && !dec.pattern.value" @click="dec.clear()">
-                Clear
-              </UButton>
-            </div>
-          </div>
-          <p
-            v-if="dec.listening.value && m.hold && !m.fsk"
-            class="mb-2 font-mono text-[11px] leading-snug text-amber-300/80"
-            role="status"
-          >
-            Holding back, not printed yet — {{ m.hold }}
-          </p>
-          <div
-            v-if="m.fsk && dec.listening.value"
-            class="mb-2 flex gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm leading-snug text-amber-200"
-            role="status"
-          >
-            <UIcon name="i-lucide-radio-tower" class="mt-0.5 size-4 shrink-0 text-amber-400" />
-            <span>
-              <span class="font-semibold">RTTY on this pitch — not Morse.</span>
-              Radioteletype is two tones 170 Hz apart switching 45 times a second; through a narrow CW filter one tone of it sounds like very fast machine code. Morsey decodes CW only, so it is not printed. RTTY contests spread across the band's CW end on contest weekends — tune to a steadier, slower keyed tone.
-            </span>
-          </div>
-          <div
-            ref="terminal"
-            class="h-56 overflow-y-auto rounded-md border border-zinc-800 bg-zinc-950 p-4 font-mono text-lg leading-relaxed text-emerald-200 whitespace-pre-wrap break-words lg:h-[26rem]"
-            aria-live="polite"
-          >
-            <template v-if="dec.text.value || dec.pattern.value">
-              <CwHighlightedText :text="dec.text.value" />
-              <span v-if="dec.pattern.value" class="ml-1 text-sm text-amber-300/80" title="Character in progress">{{ dec.pattern.value }}</span>
-              <span
-                class="ml-0.5 inline-block h-5 w-2 translate-y-1 bg-emerald-400/80"
-                :class="dec.listening.value ? 'animate-pulse' : 'opacity-30'"
-              />
-            </template>
-            <!-- empty log: the placeholder takes the first line; the cursor appears with the first character -->
-            <span v-else class="text-sm text-zinc-600">
-              {{ dec.listening.value ? 'Listening — nothing decoded yet.' : 'Nothing decoded yet. Pick an input below and press Start listening.' }}
-            </span>
-          </div>
-          <div v-if="dec.playbackProgress.value > 0 && dec.listening.value" class="mt-2">
-            <UProgress :model-value="dec.playbackProgress.value * 100" :max="100" size="xs" />
-          </div>
-          <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-wider text-zinc-500">
-            <span v-for="l in LEGEND" :key="l.label" class="flex items-center gap-1">
-              <span class="text-sm leading-none" :class="l.cls">■</span>{{ l.label }}
-            </span>
-            <span class="text-zinc-600">· hover a word for its meaning</span>
-          </div>
-        </UCard>
-
       </div>
 
-      <!-- Controls -->
-      <div class="space-y-6">
+      <!-- Configuration, under the signal display -->
+      <div class="order-3 space-y-6 lg:order-none">
         <UCard>
-          <div class="mb-3 font-mono text-[10px] uppercase tracking-widest text-zinc-500">Source</div>
+          <div class="flex items-center justify-between gap-2">
+            <button type="button" class="flex flex-1 items-center gap-1.5 text-left" :aria-expanded="open.source" @click="open.source = !open.source">
+              <UIcon :name="open.source ? 'i-lucide-chevron-down' : 'i-lucide-chevron-right'" class="size-4 text-zinc-500" />
+              <span class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Source</span>
+            </button>
+          </div>
+          <div v-show="open.source" class="mt-3">
           <div class="grid grid-cols-3 gap-1.5">
             <button
               v-for="src in SOURCES"
@@ -790,77 +919,19 @@ function reseedSpeed() {
               </template>
             </p>
           </div>
-
-          <div class="mt-4 flex items-center gap-3">
-            <UButton
-              size="lg"
-              :color="dec.listening.value ? 'error' : 'primary'"
-              :icon="dec.listening.value ? 'i-lucide-square' : 'i-lucide-play'"
-              :loading="busy"
-              class="font-mono uppercase tracking-wider"
-              @click="toggle"
-            >
-              {{ dec.listening.value ? 'Stop' : 'Start listening' }}
-            </UButton>
-            <!-- recorder: Rec → Pause → Resume / Export / Discard -->
-            <div class="flex items-center gap-1.5">
-              <UButton
-                v-if="rec === 'idle'"
-                size="lg"
-                variant="soft"
-                color="neutral"
-                icon="i-lucide-circle"
-                :disabled="!dec.listening.value"
-                class="font-mono uppercase tracking-wider"
-                title="Record a WAV take of what you are hearing — the monitor signal, levelling and all, before the volume slider. Switch the leveller off to capture the rig's own levels instead."
-                @click="recordOrResume"
-              >
-                Rec
-              </UButton>
-              <UButton
-                v-else-if="rec === 'recording'"
-                size="lg"
-                variant="soft"
-                color="error"
-                icon="i-lucide-pause"
-                class="animate-pulse font-mono uppercase tracking-wider"
-                title="Pause the take"
-                @click="dec.pauseRecording()"
-              >
-                Rec {{ recordLabel }}
-              </UButton>
-              <template v-else>
-                <UButton
-                  size="lg"
-                  variant="soft"
-                  color="error"
-                  icon="i-lucide-circle"
-                  :disabled="!dec.listening.value"
-                  class="font-mono uppercase tracking-wider"
-                  :title="dec.listening.value ? 'Resume the take' : 'Start listening to resume the take'"
-                  @click="recordOrResume"
-                >
-                  {{ recordLabel }}
-                </UButton>
-                <UButton size="lg" variant="soft" color="primary" icon="i-lucide-download" class="font-mono uppercase tracking-wider" title="Download the take as WAV and start fresh" @click="exportRecording">
-                  Export
-                </UButton>
-                <UButton size="lg" variant="ghost" color="neutral" icon="i-lucide-trash-2" title="Discard the take" @click="discardRecording" />
-              </template>
-            </div>
-            <p v-if="dec.error.value" class="text-xs leading-snug text-rose-400">{{ dec.error.value }}</p>
-            <p v-else-if="recordNote" class="text-xs leading-snug text-zinc-400">{{ recordNote }}</p>
-            <p v-else-if="dec.listening.value && dec.source.value === 'mic'" class="text-xs leading-snug text-zinc-500">
-              Keyer sidetone is muted while the microphone is live.
-            </p>
           </div>
+
         </UCard>
 
         <UCard>
-          <div class="mb-3 flex items-center justify-between">
-            <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Filter & threshold</div>
-            <UButton size="xs" variant="ghost" color="neutral" icon="i-lucide-undo-2" @click="dec.resetSettings()">Defaults</UButton>
+          <div class="flex items-center justify-between gap-2">
+            <button type="button" class="flex flex-1 items-center gap-1.5 text-left" :aria-expanded="open.filter" @click="open.filter = !open.filter">
+              <UIcon :name="open.filter ? 'i-lucide-chevron-down' : 'i-lucide-chevron-right'" class="size-4 text-zinc-500" />
+              <span class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Filter & threshold</span>
+            </button>
+            <UButton size="xs" variant="ghost" color="neutral" icon="i-lucide-undo-2" @click="dec.resetFilter()">Defaults</UButton>
           </div>
+          <div v-show="open.filter" class="mt-3">
           <div class="space-y-4">
             <div>
               <div class="mb-1 flex items-center justify-between text-sm">
@@ -914,61 +985,69 @@ function reseedSpeed() {
                 </p>
               </template>
             </div>
+          </div>
+          </div>
+        </UCard>
 
-            <div class="border-t border-zinc-800 pt-3">
-              <button class="flex w-full items-center justify-between text-sm text-zinc-300" @click="showAdvanced = !showAdvanced">
-                <span class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Timing & noise blanker</span>
-                <UIcon :name="showAdvanced ? 'i-lucide-chevron-up' : 'i-lucide-chevron-down'" class="size-4 text-zinc-500" />
-              </button>
-              <div v-if="showAdvanced" class="mt-3 space-y-4">
-                <div>
-                  <div class="mb-1 flex items-center justify-between text-sm">
-                    <span>Expected speed <span class="text-zinc-500">(seed)</span></span>
-                    <span class="flex items-center gap-2 font-mono text-emerald-400">
-                      {{ s.initialWpm }} WPM
-                      <UButton size="xs" variant="soft" color="neutral" icon="i-lucide-rotate-ccw" title="Re-seed the speed tracker" @click="reseedSpeed" />
-                    </span>
-                  </div>
-                  <USlider v-model="s.initialWpm" :min="5" :max="45" :step="1" />
-                  <p class="mt-1 text-xs leading-snug text-zinc-500">
-                    Where the dit/dah tracker starts; it re-fits itself within a character or two either way.
-                  </p>
-                </div>
-                <div class="flex items-center justify-between text-sm">
-                  <span>Lock speed <span class="text-zinc-500">(no adaptation)</span></span>
-                  <USwitch v-model="s.lockSpeed" />
-                </div>
-                <div>
-                  <div class="mb-1 flex items-center justify-between text-sm">
-                    <span>Speed averaging</span>
-                    <span class="font-mono text-emerald-400">{{ s.speedAveraging.toFixed(2) }}</span>
-                  </div>
-                  <USlider v-model="s.speedAveraging" :min="0.05" :max="1" :step="0.05" />
-                  <p class="mt-1 text-xs leading-snug text-zinc-500">Weight of each new element in the timing estimate — low is steady, high follows an erratic fist.</p>
-                </div>
-                <div>
-                  <div class="mb-1 flex items-center justify-between text-sm">
-                    <span>Noise blanker</span>
-                    <span class="font-mono text-emerald-400">{{ s.noiseBlankerMs }} ms</span>
-                  </div>
-                  <USlider v-model="s.noiseBlankerMs" :min="2" :max="30" :step="1" />
-                  <p class="mt-1 text-xs leading-snug text-zinc-500">Key changes shorter than this are ignored. A 30 WPM dit is 40 ms, so stay well under that.</p>
-                </div>
-                <div class="flex items-center justify-between text-sm">
-                  <span>Bandpass pre-filter <span class="text-zinc-500">(before the detector)</span></span>
-                  <USwitch v-model="s.prefilter" />
-                </div>
+        <UCard>
+          <div class="flex items-center justify-between gap-2">
+            <button type="button" class="flex flex-1 items-center gap-1.5 text-left" :aria-expanded="open.timing" @click="open.timing = !open.timing">
+              <UIcon :name="open.timing ? 'i-lucide-chevron-down' : 'i-lucide-chevron-right'" class="size-4 text-zinc-500" />
+              <span class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Timing & noise blanker</span>
+            </button>
+            <UButton size="xs" variant="ghost" color="neutral" icon="i-lucide-undo-2" @click="dec.resetTimingSettings()">Defaults</UButton>
+          </div>
+          <div v-show="open.timing" class="mt-3 space-y-4">
+            <div>
+              <div class="mb-1 flex items-center justify-between text-sm">
+                <span>Expected speed <span class="text-zinc-500">(seed)</span></span>
+                <span class="flex items-center gap-2 font-mono text-emerald-400">
+                  {{ s.initialWpm }} WPM
+                  <UButton size="xs" variant="soft" color="neutral" icon="i-lucide-rotate-ccw" title="Re-seed the speed tracker" @click="reseedSpeed" />
+                </span>
               </div>
+              <USlider v-model="s.initialWpm" :min="5" :max="45" :step="1" />
+              <p class="mt-1 text-xs leading-snug text-zinc-500">
+                Where the dit/dah tracker starts; it re-fits itself within a character or two either way.
+              </p>
+            </div>
+            <div class="flex items-center justify-between text-sm">
+              <span>Lock speed <span class="text-zinc-500">(no adaptation)</span></span>
+              <USwitch v-model="s.lockSpeed" />
+            </div>
+            <div>
+              <div class="mb-1 flex items-center justify-between text-sm">
+                <span>Speed averaging</span>
+                <span class="font-mono text-emerald-400">{{ s.speedAveraging.toFixed(2) }}</span>
+              </div>
+              <USlider v-model="s.speedAveraging" :min="0.05" :max="1" :step="0.05" />
+              <p class="mt-1 text-xs leading-snug text-zinc-500">Weight of each new element in the timing estimate — low is steady, high follows an erratic fist.</p>
+            </div>
+            <div>
+              <div class="mb-1 flex items-center justify-between text-sm">
+                <span>Noise blanker</span>
+                <span class="font-mono text-emerald-400">{{ s.noiseBlankerMs }} ms</span>
+              </div>
+              <USlider v-model="s.noiseBlankerMs" :min="2" :max="30" :step="1" />
+              <p class="mt-1 text-xs leading-snug text-zinc-500">Key changes shorter than this are ignored. A 30 WPM dit is 40 ms, so stay well under that.</p>
+            </div>
+            <div class="flex items-center justify-between text-sm">
+              <span>Bandpass pre-filter <span class="text-zinc-500">(before the detector)</span></span>
+              <USwitch v-model="s.prefilter" />
             </div>
           </div>
         </UCard>
 
         <!-- Operator trims on the automatic decisions: the decoder still measures everything, these move where it decides -->
         <UCard>
-          <div class="mb-1 flex items-center justify-between">
-            <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Fine tuning</div>
+          <div class="flex items-center justify-between gap-2">
+            <button type="button" class="flex flex-1 items-center gap-1.5 text-left" :aria-expanded="open.trims" @click="open.trims = !open.trims">
+              <UIcon :name="open.trims ? 'i-lucide-chevron-down' : 'i-lucide-chevron-right'" class="size-4 text-zinc-500" />
+              <span class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Fine tuning</span>
+            </button>
             <UButton size="xs" variant="ghost" color="neutral" icon="i-lucide-undo-2" @click="dec.resetTrims()">Centre all</UButton>
           </div>
+          <div v-show="open.trims" class="mt-3">
           <p class="mb-4 text-xs leading-snug text-zinc-500">
             Everything is still measured automatically — these move where the decoder draws its lines. Centred is the tested default; change one at a time while watching the text.
           </p>
@@ -1024,6 +1103,74 @@ function reseedSpeed() {
               </div>
             </div>
           </div>
+          </div>
+        </UCard>
+      </div>
+      </div>
+
+      <!-- Terminal, with the keyword feed under it -->
+      <div class="order-2 space-y-6 lg:order-none">
+        <UCard>
+          <div class="mb-2 flex items-center justify-between">
+            <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Decoded text</div>
+            <div class="flex gap-1.5">
+              <UButton size="xs" variant="soft" color="neutral" :icon="copied ? 'i-lucide-check' : 'i-lucide-copy'" :disabled="!dec.text.value" @click="copyText">
+                {{ copied ? 'Copied' : 'Copy' }}
+              </UButton>
+              <UButton size="xs" variant="soft" color="neutral" icon="i-lucide-eraser" :disabled="!dec.text.value && !dec.pattern.value" @click="dec.clear()">
+                Clear
+              </UButton>
+            </div>
+          </div>
+          <p
+            v-if="dec.listening.value && m.hold && !m.fsk"
+            class="mb-2 font-mono text-[11px] leading-snug text-amber-300/80"
+            role="status"
+          >
+            Holding back, not printed yet — {{ m.hold }}
+          </p>
+          <div
+            v-if="m.fsk && dec.listening.value"
+            class="mb-2 flex gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm leading-snug text-amber-200"
+            role="status"
+          >
+            <UIcon name="i-lucide-radio-tower" class="mt-0.5 size-4 shrink-0 text-amber-400" />
+            <span>
+              <span class="font-semibold">RTTY on this pitch — not Morse.</span>
+              Radioteletype is two tones 170 Hz apart switching 45 times a second; through a narrow CW filter one tone of it sounds like very fast machine code. Morsey decodes CW only, so it is not printed. RTTY contests spread across the band's CW end on contest weekends — tune to a steadier, slower keyed tone.
+            </span>
+          </div>
+          <div
+            ref="terminal"
+            class="h-56 min-h-40 max-h-[2000px] resize-y overflow-y-auto rounded-md border border-zinc-800 bg-zinc-950 p-4 font-mono text-lg leading-relaxed text-emerald-200 whitespace-pre-wrap break-words lg:h-[26rem]"
+            aria-live="polite"
+            title="Drag the bottom-right corner to make the terminal taller"
+          >
+            <template v-if="dec.text.value || dec.pattern.value">
+              <CwHighlightedText :text="dec.text.value" />
+              <span v-if="dec.pattern.value" class="ml-1 text-sm text-amber-300/80" title="Character in progress">{{ dec.pattern.value }}</span>
+              <span
+                class="ml-0.5 inline-block h-5 w-2 translate-y-1 bg-emerald-400/80"
+                :class="dec.listening.value ? 'animate-pulse' : 'opacity-30'"
+              />
+            </template>
+            <!-- empty log: the placeholder takes the first line; the cursor appears with the first character -->
+            <span v-else class="text-sm text-zinc-600">
+              {{ dec.listening.value ? 'Listening — nothing decoded yet.' : 'Nothing decoded yet. Pick an input on the right and press Start listening.' }}
+            </span>
+          </div>
+          <div v-if="dec.playbackProgress.value > 0 && dec.listening.value" class="mt-2">
+            <UProgress :model-value="dec.playbackProgress.value * 100" :max="100" size="xs" />
+          </div>
+        </UCard>
+
+        <!-- Keyword feed: what the highlighter picked out of the copy, newest first -->
+        <UCard>
+          <div class="mb-2 flex items-center justify-between gap-2">
+            <div class="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Keywords</div>
+            <span class="text-xs text-zinc-500">Newest first · meaning and the code to send it back</span>
+          </div>
+          <CwKeywordFeed :text="dec.text.value" />
         </UCard>
       </div>
     </div>

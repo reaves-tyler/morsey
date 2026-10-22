@@ -197,6 +197,10 @@ export interface CwDecoderState {
   fsk: boolean
   /** a burst has passed the squelch and is being printed */
   decoding: boolean
+  /** mark shorter than this is a dit — the geometric midpoint of the two clusters */
+  markBoundaryMs: number
+  /** the last few printed marks, oldest first: length and the decoder time they ended, for a timing display */
+  recentMarks: { ms: number; at: number }[]
   /** why the keying in progress is being held back rather than printed ('' = it is not) */
   hold: string
 }
@@ -227,6 +231,8 @@ for (const [ch, code] of Object.entries(MORSE)) {
 
 const TAU = Math.PI * 2
 const MARK_HISTORY = 10
+/** marks kept for the UI's timing display */
+const RECENT_MARKS = 12
 const GAP_HISTORY = 16
 /** the level histogram fills for this long after start before keying is believed */
 const WARMUP_MS = 250
@@ -645,6 +651,8 @@ export class CwDecoder {
   private letterGapMs = 180
   private wordGapMs = 420
   private marks: number[] = []
+  /** every mark that was printed, for the timing display — not the tracker's own history, which forgets outliers */
+  private recentMarks: { ms: number; at: number }[] = []
   private gaps: number[] = []
   private calibrated = false
   /** mark durations of the character in progress (re-classified when speed re-fits) */
@@ -760,6 +768,7 @@ export class CwDecoder {
     this.letterGapMs = this.ditMs * 3
     this.wordGapMs = this.ditMs * 7
     this.marks = []
+    this.recentMarks = []
     this.gaps = []
     this.wordLens = []
     this.calibrated = false
@@ -1188,6 +1197,7 @@ export class CwDecoder {
       this.pattern += marks[i]! < boundary ? '.' : '-'
       this.charFlushed = false
       this.wordFlushed = false
+      this.noteRecentMark(marks[i]!)
     }
     this.ev.onPattern?.(this.pattern)
   }
@@ -1294,9 +1304,15 @@ export class CwDecoder {
 
   // --- element handling ------------------------------------------------------------
 
+  private noteRecentMark(ms: number) {
+    this.recentMarks.push({ ms, at: this.timeMs })
+    if (this.recentMarks.length > RECENT_MARKS) this.recentMarks.shift()
+  }
+
   private onMarkEnded(dur: number) {
     const el: '.' | '-' = dur < this.markBoundary() ? '.' : '-'
     this.noteMargin(this.margin(dur, this.ditMs, this.dahMs))
+    this.noteRecentMark(dur)
     this.currentMarks.push(dur)
     this.pattern += el
     this.charFlushed = false
@@ -1585,7 +1601,9 @@ export class CwDecoder {
       confidence: this.confidence,
       fsk: this.timeMs - this.fskSeenMs < FSK_HOLD_MS,
       decoding: this.live,
-      hold: this.live || !this.burstMarks.length ? '' : this.holdReason
+      hold: this.live || !this.burstMarks.length ? '' : this.holdReason,
+      markBoundaryMs: this.markBoundary(),
+      recentMarks: this.recentMarks.slice()
     }
   }
 }

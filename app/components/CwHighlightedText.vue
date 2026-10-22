@@ -6,8 +6,11 @@
  *
  * Every token is rendered as the exact text the decoder produced — a
  * prosign is the literal `<KN>`, just coloured — so the terminal never turns
- * copy into icons or labels. The only substitution is the decoder's `*`
- * (pattern matched no character), drawn as a dim dot like the keyer pages.
+ * copy into icons or labels. The only substitutions are the decoder's unknown
+ * characters: a bare `*` is a dim dot like the keyer pages, and `{.-.-..}` —
+ * the stream adapter's form, with the elements that were heard — shows those
+ * elements dim and small, with the hover tip guessing which letters were run
+ * together (utils/cwSplit.ts).
  *
  * A callsign is a link to its QRZ page (opened in a new tab) so a station
  * heard on the air can be looked up straight from the copy.
@@ -54,6 +57,7 @@ function onOut(e: MouseEvent) {
   <span @mouseover="onOver" @mouseout="onOut">
     <template v-for="(tok, i) in tokens" :key="i">
       <template v-if="tok.kind === 'text' || tok.kind === 'space' || tok.kind === 'newline'">{{ tok.text }}</template>
+      <span v-else-if="tok.kind === 'unknown' && tok.pattern" :class="KIND_CLASS.unknown" class="text-sm tracking-wider" :data-tip="tok.tip">{{ tok.pattern }}</span>
       <span v-else-if="tok.kind === 'unknown'" :class="KIND_CLASS.unknown" :data-tip="tok.tip">·</span>
       <a
         v-else-if="tok.kind === 'callsign'"

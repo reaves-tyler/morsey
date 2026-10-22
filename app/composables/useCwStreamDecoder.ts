@@ -237,6 +237,10 @@ registerProcessor('morsey-pcm-forwarder', PcmForwarder)
 // ---- Shared state (module-level) ------------------------------------------------
 
 const listening = ref(false)
+/** true while the browser's autoplay policy keeps the AudioContext suspended — a click or key on the page clears it */
+const suspended = ref(false)
+const GESTURES = ['pointerdown', 'keydown', 'touchstart'] as const
+let gestureHooked = false
 const source = ref<DecoderSource>('line')
 const text = ref('')
 const pattern = ref('')
@@ -260,7 +264,8 @@ const latencyMs = ref(0)
 const monitorGainDb = ref(0)
 const meter = ref<CwDecoderState>({
   magnitude: 0, floor: 0, peak: 0, threshold: 0, snrDb: 0, keyed: false,
-  ditMs: 60, dahMs: 180, wpm: 20, elemGapMs: 60, letterGapMs: 180, wordGapMs: 420, pattern: '', timeMs: 0, calibrated: false, signalPresent: false, confidence: 1, fsk: false, decoding: false, hold: ''
+  ditMs: 60, dahMs: 180, wpm: 20, elemGapMs: 60, letterGapMs: 180, wordGapMs: 420, pattern: '', timeMs: 0, calibrated: false, signalPresent: false, confidence: 1, fsk: false, decoding: false, hold: '',
+  markBoundaryMs: Math.sqrt(60 * 180), recentMarks: []
 })
 /**
  * Recorder, capturing what the monitor plays (for documenting a session and
@@ -478,8 +483,11 @@ export function useCwStreamDecoder() {
     decoder = new CwDecoder(
       { sampleRate, ...toEngineConfig(settings.value) },
       {
-        onCharacter: (ch) => {
-          text.value += ch
+        onCharacter: (ch, pat) => {
+          // A pattern that matches no character is usually two letters run
+          // together; the log keeps the elements that were heard, `{.-.-..}`,
+          // so the operator (and the highlighter's guesses) can still read them
+          text.value += ch === '*' && pat ? `{${pat}}` : ch
           recentChars.value.push(ch !== '*')
           if (recentChars.value.length > 20) recentChars.value.shift()
         },
@@ -544,6 +552,35 @@ export function useCwStreamDecoder() {
       channels === 2 && e.inputBuffer.numberOfChannels > 1 ? e.inputBuffer.getChannelData(1) : undefined
     )
     return node
+  }
+
+  /**
+   * Bring the context out of 'suspended'. Without a user gesture on the page
+   * (the decoder starts itself on arrival) a browser's autoplay policy leaves
+   * the context suspended and `resume()` hangs its promise until one comes,
+   * so this never awaits it blind: it gives the browser a moment, then flags
+   * `suspended` and lets the first click or key on the page finish the job.
+   */
+  async function resumeWhenAllowed(audio: AudioContext) {
+    if (audio.state !== 'suspended') { suspended.value = false; return }
+    const settled = new Promise<void>((resolve) => {
+      audio.resume().then(resolve, resolve)
+      setTimeout(resolve, 300)
+    })
+    await settled
+    suspended.value = audio.state === 'suspended'
+    if (!suspended.value || gestureHooked) return
+    gestureHooked = true
+    const unlock = () => {
+      audio.resume().finally(() => {
+        suspended.value = audio.state === 'suspended'
+        if (!suspended.value) {
+          gestureHooked = false
+          for (const ev of GESTURES) window.removeEventListener(ev, unlock, true)
+        }
+      })
+    }
+    for (const ev of GESTURES) window.addEventListener(ev, unlock, true)
   }
 
   async function ensureGraph(): Promise<AudioContext> {
@@ -743,7 +780,7 @@ export function useCwStreamDecoder() {
     error.value = ''
     try {
       const audio = await ensureGraph()
-      if (audio.state === 'suspended') await audio.resume()
+      await resumeWhenAllowed(audio)
       teardownSource()
       decoder?.reset()
       agcNode?.port.postMessage({ reset: true })
@@ -955,6 +992,33 @@ export function useCwStreamDecoder() {
     settings.value = { ...defaultSettings(), lineDeviceId, micDeviceId, outputDeviceId, monitor, monitorMic, monitorLevel, monitorAgc }
   }
 
+  /** the Filter & threshold card back to its defaults: pitch, bandwidth, threshold mode and levels */
+  function resetFilter() {
+    const d = defaultSettings()
+    settings.value = {
+      ...settings.value,
+      centerHz: d.centerHz,
+      bandwidthHz: d.bandwidthHz,
+      thresholdMode: d.thresholdMode,
+      manualThresholdDb: d.manualThresholdDb,
+      minSnrDb: d.minSnrDb
+    }
+  }
+
+  /** the Timing & noise blanker card back to its defaults, and the tracker re-seeded from them */
+  function resetTimingSettings() {
+    const d = defaultSettings()
+    settings.value = {
+      ...settings.value,
+      initialWpm: d.initialWpm,
+      lockSpeed: d.lockSpeed,
+      speedAveraging: d.speedAveraging,
+      noiseBlankerMs: d.noiseBlankerMs,
+      prefilter: d.prefilter
+    }
+    resetTiming()
+  }
+
   /** put the fine-tuning trims back to centre (the tested defaults) */
   function resetTrims() {
     const d = defaultSettings()
@@ -971,11 +1035,11 @@ export function useCwStreamDecoder() {
 
   return {
     // state
-    listening, source, text, pattern, error, devices, outputs, devicesLabelled, suggestedLineDevice, canSelectOutput,
+    listening, suspended, source, text, pattern, error, devices, outputs, devicesLabelled, suggestedLineDevice, canSelectOutput,
     fileName, playbackProgress, latencyMs, monitorGainDb, meter, elements, settings, report,
     recording, recordingState, recordedSeconds, recordedBytes,
     // actions
-    start, stop, clear, loadFile, refreshDevices, requestDevicePermission, resetTiming, resetLevels, resetSettings, resetTrims, spectrum, spectrumBins,
+    start, stop, clear, loadFile, refreshDevices, requestDevicePermission, resetTiming, resetTimingSettings, resetFilter, resetLevels, resetSettings, resetTrims, spectrum, spectrumBins,
     startRecording, pauseRecording, exportRecording, discardRecording
   }
 }
