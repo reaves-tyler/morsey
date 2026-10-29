@@ -173,7 +173,13 @@ export interface CwDecoderState {
   ditMs: number
   /** estimated dah length in ms */
   dahMs: number
-  /** estimated character speed (PARIS) from the dit length */
+  /**
+   * Estimated character speed (PARIS) from the element period — a dit plus
+   * the gap after it is two units on any keyer, however it is weighted. A
+   * rig whose sidetone holds every mark 10 ms long and steals it from the
+   * gap (an FT-991A at 30 WPM: 50 ms dits, 30 ms gaps) reads 24 WPM from the
+   * dit alone while the skimmers spot it at 30.
+   */
   wpm: number
   /** tracked gap between the elements of a letter, and letter and word gaps, in ms */
   elemGapMs: number
@@ -1578,6 +1584,18 @@ export class CwDecoder {
     if (!this.charFlushed) this.flushChar()
   }
 
+  /**
+   * The keyer's unit: half the dit period. Mark weighting (a keyer, a rig's
+   * sidetone, a QSK envelope) moves time between the mark and the gap after
+   * it but keeps their sum, so the period is the speed even when the dit is
+   * not. Before a burst has been fitted the gap is seeded equal to the dit and
+   * this is the dit; a hand-sent fist's wide element gaps read as its slower
+   * effective speed, which is what the ear hears too.
+   */
+  private unitMs(): number {
+    return clamp((this.ditMs + this.elemGapMs) / 2, MIN_DIT_MS, MAX_DIT_MS)
+  }
+
   /** Cheap snapshot for UI meters (call from rAF, not per tick). */
   getState(): CwDecoderState {
     const snr = this.floor > 0 ? 20 * Math.log10(Math.max(this.peak, 1e-9) / this.floor) : 0
@@ -1590,7 +1608,7 @@ export class CwDecoder {
       keyed: this.keyed,
       ditMs: this.ditMs,
       dahMs: this.dahMs,
-      wpm: 1200 / this.ditMs,
+      wpm: 1200 / this.unitMs(),
       elemGapMs: this.elemGapMs,
       letterGapMs: this.letterGapMs,
       wordGapMs: this.wordGapMs,

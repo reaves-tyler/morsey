@@ -773,9 +773,11 @@ describe('real Yaesu FT-991A band recordings', () => {
   const dir = join(__dirname, 'fixtures', 'ft991a')
   /** band noise with no signal in it — a stress source, not a take (see the suite below) */
   const NOISE_FILE = '991a-band-noise.wav'
-  const TAKES: { file: string; phrases: string[]; maxEtShare: number; maxChars: number }[] = [
+  const TAKES: { file: string; phrases: string[]; maxEtShare: number; maxChars: number; centerHz?: number }[] = [
     // a strong European IOTA station calling CQ over and over at 25 WPM
     { file: '991a-iota-cq.wav', phrases: ['CQ VE2/LX1NO/P IOTA NA128'], maxEtShare: 0.15, maxChars: 90 },
+    // the operator's own 880 Hz sidetone, rig keyer at 30 WPM (see the speed test below)
+    { file: '991a-own-cq-30wpm.wav', phrases: ['KR4NZN'], maxEtShare: 0.25, maxChars: 30, centerHz: 880 },
     // 12 WPM ragchew, wide letter spacing, deep fades
     { file: '991a-dennis-rig.wav', phrases: ['FB DENNIS', 'RIG HR IS'], maxEtShare: 0.3, maxChars: 55 },
     { file: '991a-wb3bvz-qth.wav', phrases: ['QTHISCAR', 'RST5'], maxEtShare: 0.3, maxChars: 55 },
@@ -797,14 +799,14 @@ describe('real Yaesu FT-991A band recordings', () => {
     expect(wavs).toEqual(TAKES.map(t => t.file).sort())
   })
 
-  it.each(TAKES)('$file: copies what was sent', ({ file, phrases }) => {
-    const { text } = decodeTake(file)
+  it.each(TAKES)('$file: copies what was sent', ({ file, phrases, centerHz }) => {
+    const { text } = decodeTake(file, centerHz)
     const flat = text.replace(/\s+/g, '')
     for (const p of phrases) expect(flat, `${file}: "${text}"`).toContain(p.replace(/ /g, ''))
   })
 
-  it.each(TAKES)('$file: prints nothing much else', ({ file, maxEtShare, maxChars }) => {
-    const { chars, text, maxWpm } = decodeTake(file)
+  it.each(TAKES)('$file: prints nothing much else', ({ file, maxEtShare, maxChars, centerHz }) => {
+    const { chars, text, maxWpm } = decodeTake(file, centerHz)
     // E and T are one element each: they are what a decoder keying on noise
     // produces, and their share is the cleanest measure of how much of the
     // page is junk. Real English CW runs about 20 %.
@@ -815,13 +817,28 @@ describe('real Yaesu FT-991A band recordings', () => {
     expect(maxWpm, file).toBeLessThanOrEqual(MAX_WPM)
   })
 
-  function decodeTake(file: string) {
+  it('reads the keyer speed from the element period, not the dit the sidetone stretched', () => {
+    // The FT-991A keyer was set to 30 WPM and the Reverse Beacon Network
+    // spotted the transmission at 29–32, but its sidetone holds every mark
+    // ~10 ms long and takes it out of the gap: 50 ms dits, 130 ms dahs,
+    // 30 ms element gaps. The dit alone says 24 WPM; a dit plus its gap is
+    // two units on any keyer, however it is weighted.
+    const { state } = decodeTake('991a-own-cq-30wpm.wav', 880)
+    expect(state.ditMs).toBeGreaterThan(45)
+    expect(state.ditMs).toBeLessThan(55)
+    expect(state.elemGapMs).toBeGreaterThan(26)
+    expect(state.elemGapMs).toBeLessThan(38)
+    expect(state.wpm).toBeGreaterThan(28)
+    expect(state.wpm).toBeLessThan(32)
+  })
+
+  function decodeTake(file: string, centerHz?: number) {
     const { samples, sampleRate } = decodeWav16(readFileSync(join(dir, file)).buffer as ArrayBuffer)
     expect(sampleRate).toBe(8000)
     let text = ''
     const chars: string[] = []
     let maxWpm = 0
-    const decoder = new CwDecoder({ sampleRate }, {
+    const decoder = new CwDecoder({ sampleRate, ...(centerHz ? { centerHz } : {}) }, {
       onCharacter: ch => { text += ch; chars.push(ch) },
       onWordGap: () => { text += ' ' }
     })
@@ -830,7 +847,7 @@ describe('real Yaesu FT-991A band recordings', () => {
       maxWpm = Math.max(maxWpm, decoder.getState().wpm)
     }
     decoder.flush()
-    return { text: text.trim(), chars, maxWpm }
+    return { text: text.trim(), chars, maxWpm, state: decoder.getState() }
   }
 })
 

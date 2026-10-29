@@ -774,7 +774,7 @@ function reseedSpeed() {
                   {{ wpmText }} <span class="text-xs font-normal text-zinc-500">WPM</span>
                 </div>
                 <div class="font-mono text-[11px] text-zinc-500">
-                  dit {{ Math.round(m.ditMs) }} ms · dah {{ Math.round(m.dahMs) }} ms · {{ ratio }}:1
+                  dit {{ Math.round(m.ditMs) }} ms · dah {{ Math.round(m.dahMs) }} ms · {{ ratio }}:1 · gap {{ Math.round(m.elemGapMs) }} ms
                   <span v-if="!m.calibrated && dec.listening.value" class="text-amber-400"> · seeding</span>
                 </div>
               </div>
